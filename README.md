@@ -10,13 +10,25 @@
 
 The idea: give an AI agent a small but real LLM training setup and let it experiment autonomously overnight. It modifies the code, trains for 5 minutes, checks if the result improved, keeps or discards, and repeats. You wake up in the morning to a log of experiments and (hopefully) a better model. The training code here is a simplified single-GPU implementation of [nanochat](https://github.com/karpathy/nanochat). The core idea is that you're not touching any of the Python files like you normally would as a researcher. Instead, you are programming the `program.md` Markdown files that provide context to the AI agents and set up your autonomous research org. The default `program.md` in this repo is intentionally kept as a bare bones baseline, though it's obvious how one would iterate on it over time to find the "research org code" that achieves the fastest research progress, how you'd add more agents to the mix, etc. A bit more context on this project is here in this [tweet](https://x.com/karpathy/status/2029701092347630069).
 
-## Fork scope
+## Fork scope (`jsegov`)
 
 - Upstream source: [karpathy/autoresearch](https://github.com/karpathy/autoresearch)
 - Primary objective: run natively on Windows with desktop consumer NVIDIA GPUs (Turing with >=8 GB VRAM, Ampere/Ada/Blackwell with >=10 GB VRAM), without unofficial Triton-on-Windows stacks.
 - Scope of changes: compatibility and stability updates required for that target platform.
 - The original Linux/H100-oriented path from upstream is removed in this fork and is not supported here.
 - If you need the upstream Linux/H100 path, use [karpathy/autoresearch](https://github.com/karpathy/autoresearch).
+
+### Fork scope (`TerkaSlan`)
+
+This fork includes several enhancements to the training workflow for better experiment tracking and reproducibility:
+
+- **Checkpoint history**: Each training run saves a timestamped checkpoint (`checkpoint_YYYYMMDD_HHMMSS_pre_eval.pt`) before evaluation, enabling full experiment history recovery.
+- **Best model tracking**: Automatically maintains `checkpoint_best.pt` with the lowest validation bits-per-byte (val_bpb) across all runs.
+- **Experimental provenance**: Successfully marked experiments save a complete provenance package in `checkpoints/exp_YYYYMMDD_HHMMSS/` containing:
+  - `run_info.json` — full metadata including config, runtime info (GPU details, compute capability), and metrics
+  - `program.md` — copy of the agent instructions used for the experiment
+  - `results.tsv` — copy of the results file for analysis
+- **Checkpoint directory**: All checkpoints are now saved to a dedicated `checkpoints/` directory for organized storage.
 
 ## How it works
 
