@@ -5,10 +5,12 @@ Usage: uv run train.py
 """
 
 import argparse
+import datetime
 import gc
 import json
 import os
 import platform
+import shutil
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -1199,12 +1201,133 @@ def _run_training_once(runtime, tokenizer, config, device_batch_size, smoke_test
 
 
 def _save_pre_eval_checkpoint(model):
+    """Save checkpoint with timestamp before evaluation."""
     try:
+        # Create checkpoints directory if it doesn't exist
+        os.makedirs("checkpoints", exist_ok=True)
+
+        # Get state dict
         state_dict = model._orig_mod.state_dict() if hasattr(model, "_orig_mod") else model.state_dict()
-        torch.save(state_dict, "checkpoint_pre_eval.pt")
-        print("Saved checkpoint_pre_eval.pt")
+
+        # Save with timestamp for history
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        history_filename = f"checkpoints/checkpoint_{timestamp}_pre_eval.pt"
+        torch.save(state_dict, history_filename)
+        print(f"Saved history checkpoint: {history_filename}")
+
+        # Return timestamp for later use when saving with metrics
+        return timestamp, state_dict
+
     except Exception as exc:  # pragma: no cover
         print(f"Warning: could not save pre-eval checkpoint: {exc}")
+        return None, None
+
+
+def _save_checkpoint_with_metrics(state_dict, timestamp, val_bpb, step, config):
+    """Save checkpoint with evaluation metrics after evaluation."""
+    try:
+        os.makedirs("checkpoints", exist_ok=True)
+
+        checkpoint_data = {
+            'model_state_dict': state_dict,
+            'timestamp': timestamp,
+            'val_bpb': val_bpb,
+            'step': step,
+            'config': config,
+        }
+
+        # Save as checkpoint_pre_eval.pt (latest)
+        torch.save(checkpoint_data, "checkpoints/checkpoint_pre_eval.pt")
+        print(f"Saved checkpoint with metrics (val_bpb={val_bpb:.6f}): checkpoints/checkpoint_pre_eval.pt")
+
+        # Update best checkpoint if this is better
+        BestCheckpointTracker.update_if_better(checkpoint_data)
+
+    except Exception as exc:  # pragma: no cover
+        print(f"Warning: could not save checkpoint with metrics: {exc}")
+
+
+class BestCheckpointTracker:
+    """Track the best model across training runs."""
+    _best_val_bpb = None
+    _best_checkpoint_data = None
+
+    @classmethod
+    def update_if_better(cls, checkpoint_data):
+        val_bpb = checkpoint_data.get('val_bpb')
+        if val_bpb is not None:
+            if cls._best_val_bpb is None or val_bpb < cls._best_val_bpb:
+                cls._best_val_bpb = val_bpb
+                cls._best_checkpoint_data = checkpoint_data
+                torch.save(
+                    {**checkpoint_data, 'is_best': True},
+                    "checkpoints/checkpoint_best.pt"
+                )
+                print(f"New best model saved: val_bpb={val_bpb:.6f}")
+            else:
+                print(f"Current model val_bpb={val_bpb:.6f} (best: {cls._best_val_bpb:.6f})")
+
+    @classmethod
+    def load_best_or_latest(cls):
+        """Load the best checkpoint, falling back to latest if none exists."""
+        if os.path.exists("checkpoints/checkpoint_best.pt"):
+            return torch.load("checkpoints/checkpoint_best.pt", map_location='cpu', weights_only=False)
+        elif os.path.exists("checkpoints/checkpoint_pre_eval.pt"):
+            return torch.load("checkpoints/checkpoint_pre_eval.pt", map_location='cpu', weights_only=False)
+        else:
+            return None
+
+
+def _save_experiment_provenance(timestamp, val_bpb, step, config, runtime, args=None):
+    """Save experiment provenance data (program.md, results.tsv) to a timestamped directory."""
+    try:
+        # Create experiment directory relative to script location
+        script_dir = Path(__file__).parent.resolve()
+        exp_dir = script_dir / f"checkpoints/exp_{timestamp}"
+        exp_dir.mkdir(parents=True, exist_ok=True)
+
+        # Save the run configuration/metadata
+        run_info = {
+            "timestamp": timestamp,
+            "val_bpb": val_bpb,
+            "step": step,
+            "config": asdict(config),
+            "runtime": {
+                "gpu_name": runtime.gpu_name,
+                "gpu_vram_gb": runtime.gpu_vram_gb,
+                "gpu_cc": runtime.gpu_cc,
+                "amp_dtype": str(runtime.amp_dtype),
+                "tf32_enabled": runtime.tf32_enabled,
+            },
+            "args": {
+                "smoke_test": args.smoke_test if args else False,
+                "dataset": args.dataset if args else None,
+            } if args else None,
+        }
+        run_info_file = exp_dir / "run_info.json"
+        run_info_file.write_text(json.dumps(run_info, indent=2))
+
+        # Copy program.md if it exists (relative to script directory)
+        program_file = script_dir / "program.md"
+        if program_file.exists():
+            shutil.copy(program_file, exp_dir / "program.md")
+            print(f"Saved {exp_dir / 'program.md'}")
+
+        # Create results.tsv for this run (TSV format for easy analysis)
+        # Headers match typical tabular format for autoresearch results
+        dataset = args.dataset if args and hasattr(args, 'dataset') else 'tinystories'
+        results_header = "timestamp\tval_bpb\tstep\tdepth\tvocab_size\tmodel_dim\tn_heads\tn_kv_heads\tuse_activation_checkpointing\ttrain_batch_size\teval_batch_size\tlr\tmin_lr\tweight_decay\twarmup_steps\tdataset"
+        results_file = exp_dir / "results.tsv"
+        results_content = f"{results_header}\n{timestamp}\t{val_bpb:.6f}\t{step}\t{config.n_layer}\t{config.vocab_size}\t{config.n_embd}\t{config.n_head}\t{0 if config.n_kv_heads is None else config.n_kv_heads}\t{config.use_activation_checkpointing}\t{config.train_batch_size}\t{config.eval_batch_size}\t{config.learning_rate}\t{config.learning_rate_min}\t{config.weight_decay}\t{config.warmup_steps}\t{dataset}"
+        results_file.write_text(results_content)
+        print(f"Saved {exp_dir / 'results.tsv'}")
+
+        print(f"Saved experiment provenance to: {exp_dir}")
+        return exp_dir
+
+    except Exception as exc:  # pragma: no cover
+        print(f"Warning: could not save experiment provenance: {exc}")
+        return None
 
 
 def _restore_gc_after_attempt():
@@ -1289,7 +1412,17 @@ def main():
         return 1
 
     model = result["model"]
-    _save_pre_eval_checkpoint(model)
+    # Save checkpoint with timestamp before evaluation (for history)
+    timestamp, state_dict = _save_pre_eval_checkpoint(model)
+
+    # Capture config for later use in checkpoint metadata
+    config = build_model_config(
+        DEPTH,
+        vocab_size,
+        runtime,
+        use_activation_checkpointing=chosen_checkpointing,
+    )
+
     model.eval()
 
     eval_tokens = max(MAX_SEQ_LEN * chosen_train_batch * 2, 8192) if args.smoke_test else EVAL_TOKENS
@@ -1342,6 +1475,11 @@ def main():
 
     print("---")
     print(f"val_bpb:          {val_bpb:.6f}")
+    # Save checkpoint with metrics after successful evaluation
+    if timestamp and state_dict and val_bpb is not None:
+        _save_checkpoint_with_metrics(state_dict, timestamp, val_bpb, step, config)
+        # Save experiment provenance (program.md, results.tsv) to timestamped directory
+        _save_experiment_provenance(timestamp, val_bpb, step, config, runtime, args)
     print(f"training_seconds: {total_training_time:.1f}")
     print(f"total_seconds:    {t_end - result['t_start']:.1f}")
     print(f"peak_vram_mb:     {peak_vram_mb:.1f}")

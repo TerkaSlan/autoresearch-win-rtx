@@ -27,10 +27,24 @@ Based on the upstream [karpathy/autoresearch](https://github.com/karpathy/autore
 | **Dockerfile for API** | ❌ | **✅** `Dockerfile-api` |
 | **K8s deployment ready** | ❌ | **✅** UID 1000 non-root |
 | **Healthcheck endpoint** | ❌ | **✅** `/health` |
+## Fork scope (`jsegov`)
 
 ## Quick Start
 
 ### Docker (Recommended for Production)
+### Fork scope (`TerkaSlan`)
+
+This fork includes several enhancements to the training workflow for better experiment tracking and reproducibility:
+
+- **Checkpoint history**: Each training run saves a timestamped checkpoint (`checkpoint_YYYYMMDD_HHMMSS_pre_eval.pt`) before evaluation, enabling full experiment history recovery.
+- **Best model tracking**: Automatically maintains `checkpoint_best.pt` with the lowest validation bits-per-byte (val_bpb) across all runs.
+- **Experimental provenance**: Successfully marked experiments save a complete provenance package in `checkpoints/exp_YYYYMMDD_HHMMSS/` containing:
+  - `run_info.json` — full metadata including config, runtime info (GPU details, compute capability), and metrics
+  - `program.md` — copy of the agent instructions used for the experiment
+  - `results.tsv` — copy of the results file for analysis
+- **Checkpoint directory**: All checkpoints are now saved to a dedicated `checkpoints/` directory for organized storage.
+
+## How it works
 
 ```bash
 # Build the inference API image (includes tokenizer)
