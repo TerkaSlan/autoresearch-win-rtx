@@ -1281,9 +1281,10 @@ class BestCheckpointTracker:
 def _save_experiment_provenance(timestamp, val_bpb, step, config, runtime, args=None):
     """Save experiment provenance data (program.md, results.tsv) to a timestamped directory."""
     try:
-        # Create experiment directory: checkpoints/exp_YYYYMMDD_HHMMSS/
-        exp_dir = Path(f"checkpoints/exp_{timestamp}")
-        exp_dir.mkdir(exist_ok=True)
+        # Create experiment directory relative to script location
+        script_dir = Path(__file__).parent.resolve()
+        exp_dir = script_dir / f"checkpoints/exp_{timestamp}"
+        exp_dir.mkdir(parents=True, exist_ok=True)
 
         # Save the run configuration/metadata
         run_info = {
@@ -1306,8 +1307,8 @@ def _save_experiment_provenance(timestamp, val_bpb, step, config, runtime, args=
         run_info_file = exp_dir / "run_info.json"
         run_info_file.write_text(json.dumps(run_info, indent=2))
 
-        # Copy program.md if it exists
-        program_file = Path("program.md")
+        # Copy program.md if it exists (relative to script directory)
+        program_file = script_dir / "program.md"
         if program_file.exists():
             shutil.copy(program_file, exp_dir / "program.md")
             print(f"Saved {exp_dir / 'program.md'}")
