@@ -1,0 +1,56 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Data and Checkpoints
+*.arrow
+*.parquet
+*.json
+*.tsv
+data/
+results.tsv
+checkpoints/
+*.pt
+*.pth
+
+# Training artifacts
+progress.png
+*.log
+run_*
+results/
+queue/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+.github/
+
+# UV
+uv.lock

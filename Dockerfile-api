@@ -1,0 +1,84 @@
+# CPU-only Dockerfile for AutoResearch SDPA Inference API
+# Builds a self-contained image with tokenizer included (no external dependencies)
+# Designed for K8s deployment with non-root user (UID 1000)
+
+FROM python:3.10-slim
+
+# Set working directory
+WORKDIR /app
+
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    DEVICE=cpu \
+    AUTORESEARCH_CACHE_DIR=/app/cache \
+    PATH="/usr/local/bin:${PATH}"
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install uv for fast dependency installation
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
+    cp /root/.local/bin/uv /usr/local/bin/uv && \
+    cp /root/.local/bin/uvx /usr/local/bin/uvx && \
+    chmod +x /usr/local/bin/uv /usr/local/bin/uvx
+
+# Create non-root user BEFORE copying files (for proper ownership)
+# User UID 1000 as required by K8s securityContext.runAsUser
+RUN useradd -m -u 1000 inference
+
+# Copy prepare.py and inference.py for tokenizer training
+COPY --chown=inference:inference prepare.py .
+COPY --chown=inference:inference inference.py .
+
+# Install ALL Python dependencies first (including torch for prepare.py)
+# numpy is required by PyTorch (torch imports numpy internally)
+# Split install: torch from PyTorch index, others from PyPI
+RUN uv pip install --system \
+    torch==2.4.0+cpu --index-url https://download.pytorch.org/whl/cpu && \
+    uv pip install --system \
+    numpy==1.26.4 \
+    pyarrow==21.0.0 \
+    requests==2.32.0 \
+    rustbpe==0.1.0 \
+    tiktoken==0.11.0
+
+# Run prepare.py to download data and train tokenizer
+# This downloads TinyStories (~60MB) and trains a BPE tokenizer
+# Runs as root but cache will be accessible to inference user
+RUN python prepare.py \
+    && echo "Prepare completed successfully"
+
+# Copy API server
+COPY --chown=inference:inference api_server.py .
+
+# Install FastAPI dependencies
+RUN uv pip install --system fastapi uvicorn[standard] pydantic==2.10.6 starlette typing-extensions
+
+# Create checkpoints directory with correct ownership
+RUN mkdir -p /app/checkpoints && chown inference:inference /app/checkpoints
+
+# Verify tokenizer exists
+RUN if [ -f /app/cache/datasets/tinystories/tokenizer/tokenizer.pkl ]; then \
+        echo "Tokenizer found at /app/cache/datasets/tinystories/tokenizer/tokenizer.pkl"; \
+    else \
+        echo "ERROR: Tokenizer not found after prepare.py"; \
+        exit 1; \
+    fi
+
+# Switch to non-root user for running the application
+USER inference
+
+# Health check - curl is available in python:3.10-slim base image
+# Runs as inference user
+HEALTHCHECK --interval=60s --timeout=10s --start-period=120s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+# Expose API port
+EXPOSE 8000
+
+# Run the FastAPI server using uv run (matches reference Dockerfile pattern)
+CMD ["uv", "run", "python", "api_server.py", "--host", "0.0.0.0", "--port", "8000"]
