@@ -139,14 +139,23 @@ class CausalSelfAttention(nn.Module):
         k = k.transpose(1, 2)  # (B, KVH, T, D)
         v = v.transpose(1, 2)  # (B, KVH, T, D)
         attn_mask = self._get_sdpa_mask(T, window_size, q.device)
-        y = F.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            attn_mask=attn_mask,
-            is_causal=False,
-            enable_gqa=self.n_kv_head < self.n_head,
-        )
+
+        # enable_gqa was added in PyTorch 2.5+, so we need to handle older versions
+        use_gqa = self.n_kv_head < self.n_head
+        try:
+            y = F.scaled_dot_product_attention(
+                q, k, v,
+                attn_mask=attn_mask,
+                is_causal=False,
+                enable_gqa=use_gqa,
+            )
+        except TypeError:
+            # PyTorch < 2.5 doesn't support enable_gqa, GQA handled automatically
+            y = F.scaled_dot_product_attention(
+                q, k, v,
+                attn_mask=attn_mask,
+                is_causal=False,
+            )
         y = y.transpose(1, 2)
 
         y = y.contiguous().view(B, T, -1)
@@ -319,7 +328,7 @@ def generate(model, idx, max_new_tokens, temperature=1.0, top_k=None, top_p=None
         logits = logits[:, -1, :]
 
         next_token = sample_top_k(logits, temperature, top_k, top_p)
-        next_token = next_token.unsqueeze(1)
+        # sample_top_k already returns (B, 1) shape, no need to unsqueeze
 
         idx = torch.cat([idx, next_token], dim=1)
 

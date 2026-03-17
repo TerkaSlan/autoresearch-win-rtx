@@ -526,8 +526,6 @@ async def generate_text(request: GenerateRequest):
 
     try:
         # Generate tokens
-        import traceback
-        print(f"Generating with idx shape: {idx.shape}, max_tokens: {request.max_tokens}")
         generated = generate(
             model=model,
             idx=idx,
@@ -539,22 +537,28 @@ async def generate_text(request: GenerateRequest):
         )
 
         generated_tokens = generated.tolist()[0]
-        print(f"Generated {len(generated_tokens)} tokens")
+
         # Decode to text
         generated_text = tokenizer.decode(generated_tokens)
-        print(f"Decoded text: {generated_text[:100]}...")
+
+        # Convert config_dict to JSON-serializable format (handle torch.dtype)
+        config_used_serializable = {}
+        if config_dict:
+            for k, v in config_dict.items():
+                if k == "compute_dtype" and hasattr(v, "__str__"):
+                    config_used_serializable[k] = str(v).replace("torch.", "")
+                else:
+                    config_used_serializable[k] = v
 
         return GenerateResponse(
             generated_text=generated_text,
             generated_tokens=generated_tokens,
             num_tokens=len(generated_tokens),
             prompt_used=prompt_text_used,
-            config_used=config_dict,
+            config_used=config_used_serializable,
         )
 
     except Exception as e:
-        error_trace = traceback.format_exc()
-        print(f"Generation error: {error_trace}")
         raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}")
 
 
