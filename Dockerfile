@@ -38,7 +38,7 @@ ENV TORCH_CUDA_ARCH_LIST="100"
 ENV CUDA_NVCC_FLAGS="-gencode=arch=compute_100,code=sm_100"
 ENV FORCE_CUDNN_VERSION_MAJOR=9
 
-# Create non-root user first
+# Create non-root user
 RUN useradd -m -u 1000 autoresearch
 
 # Install uv globally
@@ -51,10 +51,8 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
 ENV PATH="/usr/local/bin:${PATH}"
 
 # Create working directory
-RUN mkdir -p /workspace /app && \
-    chown -R autoresearch:autoresearch /workspace /app
+RUN mkdir -p /workspace
 
-USER autoresearch
 WORKDIR /workspace
 
 # Clone the forked repository with training modifications
@@ -62,11 +60,15 @@ RUN git clone https://github.com/TerkaSlan/autoresearch-win-rtx.git autoresearch
 
 WORKDIR /workspace/autoresearch-sdpa
 
-# Create checkpoints directory
-RUN mkdir -p checkpoints
+# Install dependencies using uv (as root)
+RUN uv pip install --system torch==2.9.1 --index-url https://download.pytorch.org/whl/cu128 && \
+    uv pip install --system -r <(uv pip compile pyproject.toml)
 
-# Create symlink for convenience
-RUN ln -s /workspace/autoresearch-sdpa /app/autoresearch-sdpa
+# Chown everything to autoresearch user (do this as root before switching)
+RUN chown -R autoresearch:autoresearch /workspace
+
+# Switch to autoresearch user
+USER autoresearch
 
 # Default command - can be overridden
 CMD ["/bin/bash", "-c", "sleep infinity"]
