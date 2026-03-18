@@ -62,6 +62,10 @@ RUN git clone https://github.com/TerkaSlan/autoresearch-win-rtx.git autoresearch
 
 WORKDIR /workspace/autoresearch-sdpa
 
+# Install dependencies using uv
+RUN uv pip install --system torch==2.9.1 --index-url https://download.pytorch.org/whl/cu128 && \
+    uv pip install --system -r <(uv pip compile pyproject.toml)
+
 # Create checkpoints directory
 RUN mkdir -p checkpoints
 

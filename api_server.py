@@ -454,12 +454,37 @@ async def reload_model(request: ReloadModelRequest):
     """
     try:
         load_model_from_checkpoint(request.checkpoint)
+
+        # Convert config_dict to JSON-serializable format (handle torch.dtype and other non-serializable types)
+        def serialize_value(v):
+            """Convert a value to JSON-serializable format."""
+            if hasattr(v, '__class__') and 'torch' in str(v.__class__):
+                # Handle torch types
+                return str(v).replace("torch.", "")
+            elif isinstance(v, dict):
+                return {k: serialize_value(val) for k, val in v.items()}
+            elif isinstance(v, (list, tuple)):
+                return [serialize_value(i) for i in v]
+            else:
+                return v
+
+        config_serializable = {}
+        if config_dict:
+            for k, v in config_dict.items():
+                config_serializable[k] = serialize_value(v)
+
+        # Also serialize metrics_dict
+        metrics_serializable = {}
+        if metrics_dict:
+            for k, v in metrics_dict.items():
+                metrics_serializable[k] = serialize_value(v)
+
         return ReloadModelResponse(
             status="loaded",
             checkpoint=request.checkpoint,
             device=device,
-            config=config_dict,
-            metrics=metrics_dict,
+            config=config_serializable,
+            metrics=metrics_serializable,
             message=f"Model reloaded successfully from {request.checkpoint}",
         )
     except FileNotFoundError as e:

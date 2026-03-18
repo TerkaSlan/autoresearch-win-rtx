@@ -358,14 +358,62 @@ def _get_default_config_from_checkpoint(state_dict):
     # Count layers by looking at resid_lambdas
     n_layer = state_dict['resid_lambdas'].shape[0]
 
-    # Infer n_head from attention projection shapes
-    # c_q: (n_embd, n_embd) -> n_head * head_dim = n_embd
+    # Infer n_head and n_kv_head from attention projection shapes
+    # c_q: (n_embd, n_head * head_dim) where n_head * head_dim = n_embd
     # c_k: (n_embd, n_kv_head * head_dim)
+    # c_v: (n_embd, n_kv_head * head_dim)
+    # ve_gate: (n_kv_head, ve_gate_channels) - most reliable way to get n_kv_head
+
+    c_q_shape = state_dict['transformer.h.0.attn.c_q.weight'].shape
+    # c_q output dim = n_head * head_dim = n_embd (usually)
+    n_head_times_head_dim = c_q_shape[1]
+
+    # Try to get n_kv_head from ve_gate shape (most reliable)
+    # ve_gate layers exist in alternating layers: 1, 3, 5, ... for n_layer=8
+    n_kv_head = None
+    for i in range(n_layer):
+        ve_gate_key = f'transformer.h.{i}.attn.ve_gate.weight'
+        if ve_gate_key in state_dict:
+            ve_gate_shape = state_dict[ve_gate_key].shape
+            n_kv_head = ve_gate_shape[0]  # First dim is n_kv_head
+            break
+
+    # Fallback: infer from c_k shape if no ve_gate
+    if n_kv_head is None:
+        c_k_shape = state_dict['transformer.h.0.attn.c_k.weight'].shape
+        # Assume head_dim = n_embd // n_head, and n_kv_head * head_dim = c_k_shape[1]
+        # Try common head_dim values (64, 128, 256)
+        for possible_head_dim in [64, 128, 256, 32]:
+            if n_embd % possible_head_dim == 0:
+                possible_n_head = n_embd // possible_head_dim
+                if c_k_shape[1] % possible_head_dim == 0:
+                    possible_n_kv_head = c_k_shape[1] // possible_head_dim
+                    if possible_n_kv_head <= possible_n_head and possible_n_head % possible_n_kv_head == 0:
+                        n_kv_head = possible_n_kv_head
+                        break
+
+    # Default to n_kv_head = n_head (no GQA) if still unknown
+    if n_kv_head is None:
+        # Assume standard multi-head (no GQA)
+        # Infer head_dim from common values
+        for possible_head_dim in [64, 128, 256, 32]:
+            if n_embd % possible_head_dim == 0:
+                n_kv_head = n_embd // possible_head_dim
+                break
+        if n_kv_head is None:
+            n_kv_head = n_embd // 64  # Default head_dim = 64
+
+    # Now calculate n_head
+    # n_head * head_dim = n_embd, and we need to find head_dim
+    # head_dim should divide both n_embd and n_kv_head * head_dim (= c_k output dim)
+    # Since n_kv_head * head_dim may equal n_embd (when n_kv_head = n_head),
+    # we use: head_dim = n_embd // n_head
+    # But we know n_kv_head, so: head_dim = (n_kv_head * head_dim) / n_kv_head
+    # From c_k: output_dim = n_kv_head * head_dim
     c_k_shape = state_dict['transformer.h.0.attn.c_k.weight'].shape
     n_kv_head_times_head_dim = c_k_shape[1]
-    head_dim = n_embd // c_k_shape[0]  # head_dim = n_head * head_dim / n_head
-    n_head = c_k_shape[0] // head_dim
-    n_kv_head = n_kv_head_times_head_dim // head_dim
+    head_dim = n_kv_head_times_head_dim // n_kv_head
+    n_head = n_embd // head_dim
 
     # Check for value embeddings to verify compute_dtype and window_pattern
     has_value_embeds = any(f'value_embeds.{i}' in state_dict for i in range(n_layer))
