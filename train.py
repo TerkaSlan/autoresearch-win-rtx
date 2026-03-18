@@ -1282,8 +1282,8 @@ def _get_best_val_bpb(results_tsv_path):
         return None
 
 
-def _save_experiment_artifacts(exp_dir, checkpoint_path, results_tsv_path, program_md_path):
-    """Copy experiment artifacts to the experiment directory."""
+def _save_experiment_artifacts(exp_dir, checkpoint_path, results_tsv_path, program_md_path, val_bpb=None, step=None, config=None, runtime=None, args=None):
+    """Copy/create experiment artifacts to the experiment directory."""
     if exp_dir is None:
         return
 
@@ -1293,10 +1293,20 @@ def _save_experiment_artifacts(exp_dir, checkpoint_path, results_tsv_path, progr
             shutil.copy2(checkpoint_path, exp_dir / "checkpoint.pt")
             print(f"Copied checkpoint to {exp_dir / 'checkpoint.pt'}")
 
-        # Copy results.tsv if it exists
+        # Copy global results.tsv if it exists
         if results_tsv_path and os.path.exists(results_tsv_path):
-            shutil.copy2(results_tsv_path, exp_dir / "results.tsv")
-            print(f"Copied results.tsv to {exp_dir / 'results.tsv'}")
+            shutil.copy2(results_tsv_path, exp_dir / "results.tsv.global")
+            print(f"Copied global results.tsv to {exp_dir / 'results.tsv.global'}")
+
+        # Create results.tsv entry for this run
+        if val_bpb is not None and config is not None:
+            timestamp = exp_dir.name.split('-')[0]  # Extract timestamp from exp dir name
+            dataset = args.dataset if args and hasattr(args, 'dataset') else 'tinystories'
+            results_header = "timestamp\tval_bpb\tstep\tdepth\tvocab_size\tmodel_dim\tn_heads\tn_kv_heads\tuse_activation_checkpointing\ttrain_batch_size\teval_batch_size\tdataset"
+            results_file = exp_dir / "results.tsv"
+            results_content = f"{results_header}\n{timestamp}\t{val_bpb:.6f}\t{step}\t{config.n_layer}\t{config.vocab_size}\t{config.n_embd}\t{config.n_head}\t{config.n_kv_head}\t{config.use_activation_checkpointing}\t{-\t-\t{dataset}"
+            results_file.write_text(results_content)
+            print(f"Created run-specific results.tsv: {exp_dir / 'results.tsv'}")
 
         # Copy program.md if it exists
         if program_md_path and os.path.exists(program_md_path):
@@ -1316,8 +1326,29 @@ def _save_experiment_artifacts(exp_dir, checkpoint_path, results_tsv_path, progr
         except (subprocess.CalledProcessError, FileNotFoundError):
             print("Warning: could not save git log output")
 
+        # Save run metadata
+        if runtime is not None and config is not None:
+            run_metadata = {
+                "timestamp": exp_dir.name,
+                "val_bpb": val_bpb,
+                "step": step,
+                "config": asdict(config),
+                "runtime": {
+                    "gpu_name": runtime.gpu_name,
+                    "gpu_vram_gb": runtime.gpu_vram_gb,
+                    "gpu_cc": runtime.gpu_cc,
+                    "amp_dtype": str(runtime.amp_dtype),
+                },
+                "args": {
+                    "smoke_test": args.smoke_test if args else False,
+                    "dataset": args.dataset if args else None,
+                } if args else None,
+            }
+            (exp_dir / "run_metadata.json").write_text(json.dumps(run_metadata, indent=2))
+            print(f"Saved run metadata to {exp_dir / 'run_metadata.json'}")
+
     except Exception as exc:
-        print(f"Warning: could not copy some experiment artifacts: {exc}")
+        print(f"Warning: could not copy/some experiment artifacts: {exc}")
 
 
 def main():
@@ -1466,11 +1497,6 @@ def main():
 
     print("---")
     print(f"val_bpb:          {val_bpb:.6f}")
-    # Save checkpoint with metrics after successful evaluation
-    if timestamp and state_dict and val_bpb is not None:
-        _save_checkpoint_with_metrics(state_dict, timestamp, val_bpb, step, config)
-        # Save experiment provenance (program.md, results.tsv) to timestamped directory
-        _save_experiment_provenance(timestamp, val_bpb, step, config, runtime, args)
     print(f"training_seconds: {total_training_time:.1f}")
     print(f"total_seconds:    {t_end - result['t_start']:.1f}")
     print(f"peak_vram_mb:     {peak_vram_mb:.1f}")
@@ -1495,6 +1521,11 @@ def main():
         checkpoint_path,
         str(Path(__file__).parent / "results.tsv"),
         str(Path(__file__).parent / "program.md"),
+        val_bpb=val_bpb,
+        step=step,
+        config=config,
+        runtime=runtime,
+        args=args,
     )
 
     return 0
