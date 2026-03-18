@@ -9,6 +9,8 @@ import gc
 import json
 import os
 import platform
+import shutil
+import subprocess
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -1198,13 +1200,16 @@ def _run_training_once(runtime, tokenizer, config, device_batch_size, smoke_test
     }
 
 
-def _save_pre_eval_checkpoint(model):
+def _save_pre_eval_checkpoint(model, exp_dir=None):
     try:
         state_dict = model._orig_mod.state_dict() if hasattr(model, "_orig_mod") else model.state_dict()
-        torch.save(state_dict, "checkpoint_pre_eval.pt")
-        print("Saved checkpoint_pre_eval.pt")
+        checkpoint_path = Path(exp_dir) / "checkpoint.pt" if exp_dir else Path("checkpoint_pre_eval.pt")
+        torch.save(state_dict, checkpoint_path)
+        print(f"Saved checkpoint to {checkpoint_path}")
+        return str(checkpoint_path)
     except Exception as exc:  # pragma: no cover
         print(f"Warning: could not save pre-eval checkpoint: {exc}")
+        return None
 
 
 def _restore_gc_after_attempt():
@@ -1214,11 +1219,110 @@ def _restore_gc_after_attempt():
     gc.collect()
 
 
+def _get_latest_commit_sha():
+    """Get the most recent git commit SHA, or 'unknown' if not in a git repo."""
+    try:
+        result = subprocess.run(
+            ["git", "log", "-1", "--format=%H"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return result.stdout.strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return "unknown"
+
+
+def _create_experiment_dir():
+    """Create experiment directory with timestamp and latest commit SHA."""
+    try:
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        commit_sha = _get_latest_commit_sha()
+        exp_dir_name = f"{timestamp}-{commit_sha[:7]}"
+
+        # Use checkpoints/ directory for persistence
+        base_path = Path(__file__).parent / "checkpoints"
+        base_path.mkdir(parents=True, exist_ok=True)
+        exp_dir = base_path / exp_dir_name
+        exp_dir.mkdir(parents=True, exist_ok=True)
+        print(f"Experiment directory: {exp_dir}")
+        return exp_dir
+    except Exception as exc:
+        print(f"Warning: could not create experiment directory: {exc}")
+        return None
+
+
+def _get_best_val_bpb(results_tsv_path):
+    """Get the best (lowest) val_bpb from results.tsv, or None if file doesn't exist."""
+    try:
+        if not os.path.exists(results_tsv_path):
+            return None
+        with open(results_tsv_path, "r") as f:
+            lines = f.readlines()
+        if len(lines) <= 1:  # Only header or empty
+            return None
+        best = float("inf")
+        for line in lines[1:]:  # Skip header
+            parts = line.strip().split("\t")
+            if len(parts) >= 2:
+                try:
+                    val_bpb = float(parts[1])
+                    if val_bpb > 0:  # Ignore crash entries (0.000000)
+                        best = min(best, val_bpb)
+                except ValueError:
+                    pass
+        return best if best != float("inf") else None
+    except Exception as exc:
+        print(f"Warning: could not read best val_bpb from results.tsv: {exc}")
+        return None
+
+
+def _save_experiment_artifacts(exp_dir, checkpoint_path, results_tsv_path, program_md_path):
+    """Copy experiment artifacts to the experiment directory."""
+    if exp_dir is None:
+        return
+
+    try:
+        # Copy checkpoint to experiment directory
+        if checkpoint_path and os.path.exists(checkpoint_path):
+            shutil.copy2(checkpoint_path, exp_dir / "checkpoint.pt")
+            print(f"Copied checkpoint to {exp_dir / 'checkpoint.pt'}")
+
+        # Copy results.tsv if it exists
+        if results_tsv_path and os.path.exists(results_tsv_path):
+            shutil.copy2(results_tsv_path, exp_dir / "results.tsv")
+            print(f"Copied results.tsv to {exp_dir / 'results.tsv'}")
+
+        # Copy program.md if it exists
+        if program_md_path and os.path.exists(program_md_path):
+            shutil.copy2(program_md_path, exp_dir / "program.md")
+            print(f"Copied program.md to {exp_dir / 'program.md'}")
+
+        # Save git log output
+        try:
+            git_log = subprocess.run(
+                ["git", "log", "-1"],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout
+            (exp_dir / "git_log.txt").write_text(git_log)
+            print(f"Saved git log to {exp_dir / 'git_log.txt'}")
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            print("Warning: could not save git log output")
+
+    except Exception as exc:
+        print(f"Warning: could not copy some experiment artifacts: {exc}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Autoresearch training script")
     parser.add_argument("--smoke-test", action="store_true", help="Run a short train/eval pass for validation.")
     parser.add_argument("--dataset", choices=DATASET_CHOICES, default=None, help="Optional dataset override.")
     args = parser.parse_args()
+
+    # Create experiment directory at the start
+    exp_dir = _create_experiment_dir()
 
     runtime = detect_runtime()
     print(f"GPU: {runtime.gpu_name}")
@@ -1289,8 +1393,15 @@ def main():
         return 1
 
     model = result["model"]
-    _save_pre_eval_checkpoint(model)
     model.eval()
+
+    # Get best val_bpb from previous results
+    results_tsv_path = Path(__file__).parent / "results.tsv"
+    best_val_bpb = _get_best_val_bpb(str(results_tsv_path))
+    if best_val_bpb is not None:
+        print(f"Best previous val_bpb: {best_val_bpb:.6f}")
+    else:
+        print("No previous results found (first run)")
 
     eval_tokens = max(MAX_SEQ_LEN * chosen_train_batch * 2, 8192) if args.smoke_test else EVAL_TOKENS
     val_bpb = None
@@ -1319,6 +1430,14 @@ def main():
     if val_bpb is None:
         print("FAIL: eval failed for all batch sizes.")
         return 1
+
+    # Save checkpoint only if val_bpb improved (lower than best previous)
+    checkpoint_path = None
+    if best_val_bpb is None or val_bpb < best_val_bpb:
+        print(f"val_bpb improved! ({best_val_bpb if best_val_bpb is not None else 'N/A'} -> {val_bpb:.6f})")
+        checkpoint_path = _save_pre_eval_checkpoint(model, exp_dir)
+    else:
+        print(f"val_bpb did not improve ({best_val_bpb:.6f} -> {val_bpb:.6f}) - skipping checkpoint save")
 
     t_end = time.time()
     step = result["step"]
@@ -1359,6 +1478,15 @@ def main():
     print(f"activation_checkpointing: {'enabled' if chosen_checkpointing else 'disabled'}")
     if args.smoke_test:
         print("smoke_test:       true")
+
+    # Save all experiment artifacts to the experiment directory
+    _save_experiment_artifacts(
+        exp_dir,
+        checkpoint_path,
+        str(Path(__file__).parent / "results.tsv"),
+        str(Path(__file__).parent / "program.md"),
+    )
+
     return 0
 
 

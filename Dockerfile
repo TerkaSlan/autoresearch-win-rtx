@@ -23,6 +23,7 @@ RUN apt-get update && apt-get install -y \
     wget \
     build-essential \
     ninja-build \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 # Set Python 3.10 as default python3
@@ -45,14 +46,13 @@ ENV PATH="/usr/local/bin:${PATH}"
 WORKDIR /app
 
 # Copy application files
-COPY --chown=inference:inference model.py .
-COPY --chown=inference:inference inference.py .
-COPY --chown=inference:inference api_server.py .
+COPY --chown=inference:inference train.py .
+COPY --chown=inference:inference prepare.py .
 COPY --chown=inference:inference pyproject.toml .
 
 # Install dependencies using uv
 RUN uv pip install --system torch==2.9.1 --index-url https://download.pytorch.org/whl/cu128 && \
-    uv pip install --system -r <(uv pip compile pyproject.toml --no-dev)
+    uv pip install --system -r <(uv pip compile pyproject.toml)
 
 # Create checkpoints directory
 RUN mkdir -p /app/checkpoints && chown inference:inference /app/checkpoints
@@ -60,8 +60,5 @@ RUN mkdir -p /app/checkpoints && chown inference:inference /app/checkpoints
 # Switch to non-root user
 USER inference
 
-# Expose API port
-EXPOSE 8000
-
-# Default command - run the FastAPI server
-CMD ["uv", "run", "python", "api_server.py", "--host", "0.0.0.0", "--port", "8000"]
+# Default command - run the training script
+CMD ["uv", "run", "python", "train.py"]
