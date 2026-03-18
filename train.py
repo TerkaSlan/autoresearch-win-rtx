@@ -5,6 +5,7 @@ Usage: uv run train.py
 """
 
 import argparse
+import datetime
 import gc
 import json
 import os
@@ -1202,6 +1203,10 @@ def _run_training_once(runtime, tokenizer, config, device_batch_size, smoke_test
 
 def _save_pre_eval_checkpoint(model, exp_dir=None):
     try:
+        # Create checkpoints directory if it doesn't exist
+        os.makedirs("checkpoints", exist_ok=True)
+
+        # Get state dict
         state_dict = model._orig_mod.state_dict() if hasattr(model, "_orig_mod") else model.state_dict()
         checkpoint_path = Path(exp_dir) / "checkpoint.pt" if exp_dir else Path("checkpoint_pre_eval.pt")
         torch.save(state_dict, checkpoint_path)
@@ -1461,6 +1466,11 @@ def main():
 
     print("---")
     print(f"val_bpb:          {val_bpb:.6f}")
+    # Save checkpoint with metrics after successful evaluation
+    if timestamp and state_dict and val_bpb is not None:
+        _save_checkpoint_with_metrics(state_dict, timestamp, val_bpb, step, config)
+        # Save experiment provenance (program.md, results.tsv) to timestamped directory
+        _save_experiment_provenance(timestamp, val_bpb, step, config, runtime, args)
     print(f"training_seconds: {total_training_time:.1f}")
     print(f"total_seconds:    {t_end - result['t_start']:.1f}")
     print(f"peak_vram_mb:     {peak_vram_mb:.1f}")
