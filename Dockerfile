@@ -21,7 +21,6 @@ RUN apt-get update && apt-get install -y \
     python3.10-distutils \
     tmux \
     curl \
-    git \
     vim \
     wget \
     build-essential \
@@ -53,12 +52,14 @@ ENV PATH="/usr/local/bin:${PATH}"
 # Create working directory
 RUN mkdir -p /workspace
 
-WORKDIR /workspace
-
-# Clone the forked repository with training modifications
-RUN git clone https://github.com/TerkaSlan/autoresearch-win-rtx.git autoresearch-sdpa
-
+# Set working directory
 WORKDIR /workspace/autoresearch-sdpa
+
+# Copy project files (instead of cloning from GitHub)
+COPY --chown=autoresearch:autoresearch train.py .
+COPY --chown=autoresearch:autoresearch prepare.py .
+COPY --chown=autoresearch:autoresearch pyproject.toml .
+COPY --chown=autoresearch:autoresearch program.md .
 
 # Install dependencies using uv (as root)
 RUN uv pip install --system torch==2.9.1 --index-url https://download.pytorch.org/whl/cu128 && \
@@ -67,7 +68,7 @@ RUN uv pip install --system torch==2.9.1 --index-url https://download.pytorch.or
 # Create checkpoints directory
 RUN mkdir -p checkpoints
 
-# Chown everything to autoresearch user (do this as root before switching)
+# Chown everything to autoresearch user
 RUN chown -R autoresearch:autoresearch /workspace
 
 # Switch to autoresearch user

@@ -1304,7 +1304,8 @@ def _save_experiment_artifacts(exp_dir, checkpoint_path, results_tsv_path, progr
             dataset = args.dataset if args and hasattr(args, 'dataset') else 'tinystories'
             results_header = "timestamp\tval_bpb\tstep\tdepth\tvocab_size\tmodel_dim\tn_heads\tn_kv_heads\tuse_activation_checkpointing\ttrain_batch_size\teval_batch_size\tdataset"
             results_file = exp_dir / "results.tsv"
-            results_content = f"{results_header}\n{timestamp}\t{val_bpb:.6f}\t{step}\t{config.n_layer}\t{config.vocab_size}\t{config.n_embd}\t{config.n_head}\t{config.n_kv_head}\t{config.use_activation_checkpointing}\t{-\t-\t{dataset}"
+            tab = '\t'
+            results_content = f"{results_header}{tab}{timestamp}{tab}{val_bpb:.6f}{tab}{step}{tab}{config.n_layer}{tab}{config.vocab_size}{tab}{config.n_embd}{tab}{config.n_head}{tab}{config.n_kv_head}{tab}{config.use_activation_checkpointing}{tab}-{tab}-{tab}{dataset}"
             results_file.write_text(results_content)
             print(f"Created run-specific results.tsv: {exp_dir / 'results.tsv'}")
 
