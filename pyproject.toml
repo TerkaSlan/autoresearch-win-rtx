@@ -1,7 +1,7 @@
 [project]
-name = "autoresearch"
-version = "0.1.0"
-description = "Autonomous pretraining research swarm"
+name = "autoresearch-inference"
+version = "0.2.0"
+description = "AutoResearch SDPA with inference API"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -13,6 +13,8 @@ dependencies = [
     "rustbpe>=0.1.0",
     "tiktoken>=0.11.0",
     "torch==2.9.1",
+    "fastapi>=0.100.0",
+    "uvicorn>=0.23.0",
 ]
 
 [tool.uv.sources]

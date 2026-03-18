@@ -60,9 +60,18 @@ RUN git clone https://github.com/TerkaSlan/autoresearch-win-rtx.git autoresearch
 
 WORKDIR /workspace/autoresearch-sdpa
 
+<<<<<<< HEAD
 # Install dependencies using uv (as root)
 RUN uv pip install --system torch==2.9.1 --index-url https://download.pytorch.org/whl/cu128 && \
     uv pip install --system -r <(uv pip compile pyproject.toml)
+=======
+# Install dependencies using uv
+RUN uv pip install --system torch==2.9.1 --index-url https://download.pytorch.org/whl/cu128 && \
+    uv pip install --system -r <(uv pip compile pyproject.toml)
+
+# Create checkpoints directory
+RUN mkdir -p checkpoints
+>>>>>>> 89ca08c0335985dfbdd44e42ae373b701a6934ce
 
 # Chown everything to autoresearch user (do this as root before switching)
 RUN chown -R autoresearch:autoresearch /workspace
