@@ -1307,29 +1307,10 @@ def _save_experiment_artifacts(exp_dir, checkpoint_path, results_tsv_path, progr
         else:
             print("Note: no checkpoint_path provided (val_bpb did not improve or is first run)")
 
-        # Copy global results.tsv if it exists
-        if results_tsv_path:
-            print(f"Checking results.tsv path: {results_tsv_path}, exists: {os.path.exists(results_tsv_path)}")
-            if os.path.exists(results_tsv_path):
-                shutil.copy2(results_tsv_path, exp_dir / "results.tsv.global")
-                print(f"Copied global results.tsv to {exp_dir / 'results.tsv.global'}")
-            else:
-                print("Note: global results.tsv does not exist (first run?)")
-        else:
-            print("Note: results_tsv_path is None")
-
-        # Create results.tsv entry for this run
-        if val_bpb is not None and config is not None:
-            timestamp = exp_dir.name.split('-')[0]  # Extract timestamp from exp dir name
-            dataset = args.dataset if args and hasattr(args, 'dataset') else 'tinystories'
-            results_header = "timestamp\tval_bpb\tstep\tdepth\tvocab_size\tmodel_dim\tn_heads\tn_kv_heads\tuse_activation_checkpointing\ttrain_batch_size\teval_batch_size\tdataset"
-            results_file = exp_dir / "results.tsv"
-            tab = '\t'
-            results_content = f"{results_header}{tab}{timestamp}{tab}{val_bpb:.6f}{tab}{step}{tab}{config.n_layer}{tab}{config.vocab_size}{tab}{config.n_embd}{tab}{config.n_head}{tab}{config.n_kv_head}{tab}{config.use_activation_checkpointing}{tab}-{tab}-{tab}{dataset}"
-            results_file.write_text(results_content)
-            print(f"Created run-specific results.tsv: {exp_dir / 'results.tsv'}")
-        else:
-            print(f"Skipping results.tsv creation: val_bpb={val_bpb}, config={config is not None}")
+        # Copy global results.tsv if it exists (for provenance)
+        if results_tsv_path and os.path.exists(results_tsv_path):
+            shutil.copy2(results_tsv_path, exp_dir / "results.tsv.global")
+            print(f"Copied global results.tsv to {exp_dir / 'results.tsv.global'}")
 
         # Copy program.md if it exists
         if program_md_path:

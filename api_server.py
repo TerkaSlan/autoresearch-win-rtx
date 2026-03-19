@@ -213,28 +213,27 @@ class GitLogCommit(BaseModel):
 class ExperimentInfoResponse(BaseModel):
     """Response model for experiment info."""
     exp_dir: str = Field(description="Experiment directory name")
-    checkpoint_path: str = Field(description="Path to checkpoint.pt file")
+    checkpoint_path: Optional[str] = Field(default=None, description="Path to checkpoint.pt file, None if not found")
     has_checkpoint: bool = Field(description="Whether checkpoint.pt exists")
     has_program: bool = Field(description="Whether program.md exists")
-    has_results: bool = Field(description="Whether results.tsv exists")
+    has_results: bool = Field(description="Whether results.tsv.global exists")
     has_git_log: bool = Field(description="Whether git_log.txt exists")
-    has_global_results: bool = Field(description="Whether results.tsv.global exists")
     has_metadata: bool = Field(description="Whether run_metadata.json exists")
     git_log: Optional[list[GitLogCommit]] = Field(default=None, description="Git commit history from git_log.txt")
-    results_data: Optional[dict] = Field(default=None, description="Parsed results.tsv data")
+    results_data: Optional[dict] = Field(default=None, description="Parsed results.tsv.global data")
     metadata: Optional[dict] = Field(default=None, description="Parsed run_metadata.json")
 
 
 class LatestExperimentResponse(BaseModel):
     """Response model for latest experiment."""
     exp_dir: str = Field(description="Latest experiment directory")
-    checkpoint_path: str = Field(description="Path to checkpoint.pt in latest experiment")
+    checkpoint_path: Optional[str] = Field(default=None, description="Path to checkpoint.pt in latest experiment, None if not found")
 
 
 class ExperimentDir(BaseModel):
     """Represents a single experiment directory."""
     name: str = Field(description="Experiment directory name")
-    checkpoint_path: str = Field(description="Path to checkpoint.pt")
+    checkpoint_path: Optional[str] = Field(default=None, description="Path to checkpoint.pt, None if not found")
     has_checkpoint: bool = Field(description="Whether checkpoint.pt exists")
 
 
@@ -375,28 +374,32 @@ def _get_exp_dir_path(exp_dir_name: str) -> Path:
 
 
 def _get_latest_experiment_dir() -> Optional[str]:
-    """Find the most recent experiment directory.
+    """Find the most recent experiment directory with a checkpoint.
 
-    Looks for directories in CHECKPOINTS_BASE_PATH that start with a year (e.g., 2026...).
+    Looks for directories in CHECKPOINTS_BASE_PATH that start with a year (e.g., 2026...)
+    and returns the latest one that has a checkpoint.pt file.
 
     Returns:
-        Latest experiment directory name, or None if no directories found
+        Latest experiment directory name with checkpoint, or None if none found
     """
     base_path = Path(CHECKPOINTS_BASE_PATH)
     if not base_path.exists():
         return None
 
-    # Find all directories that start with 2026 (or current year pattern)
+    # Find all directories that start with 2026 (or current year pattern) and have a checkpoint
     exp_dirs = []
     for item in base_path.iterdir():
         if item.is_dir():
             name = item.name
             # Check if directory name starts with year pattern (YYYYMMDD)
             if name[:4].isdigit() and len(name) >= 8:
-                try:
-                    exp_dirs.append((name, item))
-                except (ValueError, IndexError):
-                    continue
+                checkpoint_path = item / "checkpoint.pt"
+                # Only include directories that have a checkpoint
+                if checkpoint_path.exists():
+                    try:
+                        exp_dirs.append((name, item))
+                    except (ValueError, IndexError):
+                        continue
 
     if not exp_dirs:
         return None
@@ -427,10 +430,11 @@ def _list_experiment_dirs() -> list[dict]:
             if name[:4].isdigit() and len(name) >= 8:
                 exp_dir_path = item
                 checkpoint_path = exp_dir_path / "checkpoint.pt"
+                has_checkpoint = checkpoint_path.exists()
                 experiments.append({
                     'name': name,
-                    'checkpoint_path': str(checkpoint_path),
-                    'has_checkpoint': checkpoint_path.exists()
+                    'checkpoint_path': str(checkpoint_path) if has_checkpoint else None,
+                    'has_checkpoint': has_checkpoint
                 })
 
     # Sort by directory name (timestamp) descending
@@ -457,19 +461,18 @@ def _get_exp_dir_info(exp_dir_name: str) -> dict:
 
     checkpoint_path = exp_dir / "checkpoint.pt"
     program_path = exp_dir / "program.md"
-    results_path = exp_dir / "results.tsv"
+    results_global_path = exp_dir / "results.tsv.global"
     git_log_path = exp_dir / "git_log.txt"
-    global_results_path = exp_dir / "results.tsv.global"
     metadata_path = exp_dir / "run_metadata.json"
 
+    has_checkpoint = checkpoint_path.exists()
     info = {
         'exp_dir': exp_dir_name,
-        'checkpoint_path': str(checkpoint_path),
-        'has_checkpoint': checkpoint_path.exists(),
+        'checkpoint_path': str(checkpoint_path) if has_checkpoint else None,
+        'has_checkpoint': has_checkpoint,
         'has_program': program_path.exists(),
-        'has_results': results_path.exists(),
+        'has_results': results_global_path.exists(),
         'has_git_log': git_log_path.exists(),
-        'has_global_results': global_results_path.exists(),
         'has_metadata': metadata_path.exists(),
     }
 
@@ -477,9 +480,9 @@ def _get_exp_dir_info(exp_dir_name: str) -> dict:
     if git_log_path.exists():
         info['git_log'] = _parse_git_log(git_log_path)
 
-    # Parse results.tsv if exists
-    if results_path.exists():
-        info['results_data'] = _parse_results_tsv(results_path)
+    # Parse results.tsv.global if exists (provenance tracking)
+    if results_global_path.exists():
+        info['results_data'] = _parse_results_tsv(results_global_path)
 
     # Parse metadata if exists
     if metadata_path.exists():
@@ -884,22 +887,23 @@ async def list_experiments():
 
 @app.get("/latest", response_model=LatestExperimentResponse)
 async def get_latest_exp():
-    """Get the latest experiment directory.
+    """Get the latest experiment directory with a checkpoint.
 
-    Finds the most recent experiment directory in the checkpoints folder.
-    Directories are expected to be named with timestamp format: YYYYMMDD_HHMMSS-<commit_short>
+    Finds the most recent experiment directory in the checkpoints folder that
+    has a checkpoint.pt file. Directories are expected to be named with
+    timestamp format: YYYYMMDD_HHMMSS-<commit_short>
 
     Returns:
-        Latest experiment directory name and checkpoint path
+        Latest experiment directory name with checkpoint and checkpoint path
 
     Raises:
-        HTTPException: If no experiment directories found
+        HTTPException: If no experiment directories with checkpoint found
     """
     latest = _get_latest_experiment_dir()
     if latest is None:
         raise HTTPException(
             status_code=404,
-            detail=f"No experiment directories found in {CHECKPOINTS_BASE_PATH}"
+            detail=f"No experiment directories with checkpoint found in {CHECKPOINTS_BASE_PATH}"
         )
 
     exp_dir = _get_exp_dir_path(latest)
@@ -907,7 +911,7 @@ async def get_latest_exp():
 
     return LatestExperimentResponse(
         exp_dir=latest,
-        checkpoint_path=str(checkpoint_path)
+        checkpoint_path=str(checkpoint_path) if checkpoint_path.exists() else None
     )
 
 
@@ -949,23 +953,23 @@ async def get_exp_info(exp_dir: str):
 
 @app.get("/info", response_model=ExperimentInfoResponse)
 async def get_latest_exp_info():
-    """Get information about the latest experiment directory.
+    """Get information about the latest experiment directory with a checkpoint.
 
     This is a convenience endpoint that combines /latest and /info/{exp_dir}.
     Returns the contents of the latest experiment's checkpoint.pt, program.md,
-    results.tsv, and git_log.txt files.
+    results.tsv, and git_log.txt files. Only looks at directories with checkpoint.pt.
 
     Returns:
         Latest experiment info including file existence status, git log, and parsed results
 
     Raises:
-        HTTPException: If no experiment directories found
+        HTTPException: If no experiment directories with checkpoint found
     """
     latest = _get_latest_experiment_dir()
     if latest is None:
         raise HTTPException(
             status_code=404,
-            detail=f"No experiment directories found in {CHECKPOINTS_BASE_PATH}"
+            detail=f"No experiment directories with checkpoint found in {CHECKPOINTS_BASE_PATH}"
         )
 
     try:
