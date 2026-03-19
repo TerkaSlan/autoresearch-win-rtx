@@ -87,6 +87,66 @@ c3d4e5f	1.005000	44.0	discard	switch to GeLU activation
 d4e5f6g	0.000000	0.0	crash	double model width (OOM)
 ```
 
+## Experiment Persistence
+
+The training script requires an explicitly created experiment directory to save checkpoints. Each successful experiment should have its own directory in the `checkpoints/` folder.
+
+### Creating Experiment Directories
+
+**Before running each experiment**, create a new experiment directory with a timestamp and commit SHA:
+```bash
+timestamp=$(date +%Y%m%d_%H%M%S)
+commit_short=$(git rev-parse --short HEAD)
+exp_dir="checkpoints/${timestamp}-${commit_short}"
+mkdir -p "$exp_dir"
+echo "Experiment directory: $exp_dir"
+```
+
+### Running Training with --exp-dir
+
+Pass the experiment directory to the training script:
+```bash
+uv run train.py --exp-dir "$exp_dir" > run.log 2>&1
+```
+
+The checkpoint will be saved to `$exp_dir/checkpoint.pt` only if val_bpb improves.
+
+### Required Experiment Files
+
+For each successful experiment (where val_bpb decreased), ensure these files exist in the experiment directory:
+
+1. **checkpoint.pt** - Automatically saved by train.py when val_bpb improves
+2. **git_log.txt** - Git commit info for provenance
+3. **results.tsv.global** - Copy of the global results.tsv file
+
+### Saving Experiment Artifacts (AI Agent Responsibility)
+
+After each run that produces a checkpoint (val_bpb improved), you need to create the supporting files:
+
+1. **Create git_log.txt** in the experiment directory:
+   ```bash
+   git log -1 > "$exp_dir/git_log.txt"
+   ```
+
+2. **Copy global results.tsv** to the experiment directory:
+   ```bash
+   cp results.tsv "$exp_dir/results.tsv.global"
+   ```
+
+3. Verify all files exist:
+   ```bash
+   ls "$exp_dir/checkpoint.pt" "$exp_dir/git_log.txt" "$exp_dir/results.tsv.global"
+   ```
+
+### Directory Permissions
+
+Ensure the `checkpoints/` directory is writeable:
+```bash
+chmod 775 checkpoints/
+```
+
+In production (Kubernetes), the checkpoints PVC is shared with the API server, so files you save here will be accessible for inference.
+
 ## The experiment loop
 
 The experiment runs on a dedicated branch (e.g. `autoresearch/mar5` or `autoresearch/mar5-gpu0`).
@@ -95,13 +155,20 @@ LOOP FOREVER:
 
 1. Look at the git state: the current branch/commit we're on
 2. Tune `train.py` with an experimental idea by directly hacking the code.
-3. git commit
-4. Run the experiment: `uv run train.py > run.log 2>&1` (redirect everything — do NOT use tee or let output flood your context)
-5. Read out the results: `grep "^val_bpb:\|^peak_vram_mb:" run.log`
-6. If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python stack trace and attempt a fix. If you can't get things to work after more than a few attempts, give up.
-7. Record the results in the tsv
-8. If val_bpb improved (lower), you "advance" the branch, keeping the git commit
-9. If val_bpb is equal or worse, you git reset back to where you started
+3. git commit - Use the following attribution for Co-Authored-By: "GLM-4.7 <k8s@cerit-sc.cz>" (this is the model running autoresearch on e-infra CZ services)
+4. Create experiment directory: `timestamp=$(date +%Y%m%d_%H%M%S); commit_short=$(git rev-parse --short HEAD); exp_dir="checkpoints/${timestamp}-${commit_short}"; mkdir -p "$exp_dir"`
+5. Run the experiment: `uv run train.py --exp-dir "$exp_dir" > run.log 2>&1` (redirect everything — do NOT use tee or let output flood your context)
+6. Read out the results: `grep "^val_bpb:\|^peak_vram_mb:" run.log`
+7. If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python stack trace and attempt a fix. If you can't get things to work after more than a few attempts, give up.
+8. Record the results in the tsv
+9. If val_bpb improved (lower) and checkpoint.pt exists in $exp_dir:
+   - Save git_log.txt: `git log -1 > "$exp_dir/git_log.txt"`
+   - Copy results.tsv: `cp results.tsv "$exp_dir/results.tsv.global"`
+   - Verify files: `ls "$exp_dir/checkpoint.pt" "$exp_dir/git_log.txt" "$exp_dir/results.tsv.global"`
+   - You "advance" the branch, keeping the git commit
+10. If val_bpb is equal or worse (or checkpoint not saved):
+    - You git reset back to where you started
+    - Optionally remove empty experiment directory: `rm -rf "$exp_dir"`
 
 The idea is that you are a completely autonomous researcher trying things out. If they work, keep. If they don't, discard. And you're advancing the branch so that you can iterate. If you feel like you're getting stuck in some way, you can rewind but you should probably do this very very sparingly (if ever).
 

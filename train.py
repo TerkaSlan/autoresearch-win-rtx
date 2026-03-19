@@ -10,8 +10,6 @@ import gc
 import json
 import os
 import platform
-import shutil
-import subprocess
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -1202,18 +1200,19 @@ def _run_training_once(runtime, tokenizer, config, device_batch_size, smoke_test
 
 
 def _save_pre_eval_checkpoint(model, exp_dir=None):
+    """Save checkpoint to exp_dir if provided, otherwise to current directory."""
     try:
-        # Create checkpoints directory if it doesn't exist
-        os.makedirs("checkpoints", exist_ok=True)
-
-        # Get state dict
         state_dict = model._orig_mod.state_dict() if hasattr(model, "_orig_mod") else model.state_dict()
-        checkpoint_path = Path(exp_dir) / "checkpoint.pt" if exp_dir else Path("checkpoint_pre_eval.pt")
+        if exp_dir:
+            checkpoint_path = Path(exp_dir) / "checkpoint.pt"
+            checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            checkpoint_path = Path("checkpoint.pt")
         torch.save(state_dict, checkpoint_path)
         print(f"Saved checkpoint to {checkpoint_path}")
         return str(checkpoint_path)
     except Exception as exc:  # pragma: no cover
-        print(f"Warning: could not save pre-eval checkpoint: {exc}")
+        print(f"Warning: could not save checkpoint: {exc}")
         return None
 
 
@@ -1222,39 +1221,6 @@ def _restore_gc_after_attempt():
         gc.unfreeze()
     gc.enable()
     gc.collect()
-
-
-def _get_latest_commit_sha():
-    """Get the most recent git commit SHA, or 'unknown' if not in a git repo."""
-    try:
-        result = subprocess.run(
-            ["git", "log", "-1", "--format=%H"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        return result.stdout.strip()
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return "unknown"
-
-
-def _create_experiment_dir():
-    """Create experiment directory with timestamp and latest commit SHA."""
-    try:
-        timestamp = time.strftime("%Y%m%d_%H%M%S")
-        commit_sha = _get_latest_commit_sha()
-        exp_dir_name = f"{timestamp}-{commit_sha[:7]}"
-
-        # Use checkpoints/ directory for persistence
-        base_path = Path(__file__).parent / "checkpoints"
-        base_path.mkdir(parents=True, exist_ok=True)
-        exp_dir = base_path / exp_dir_name
-        exp_dir.mkdir(parents=True, exist_ok=True)
-        print(f"Experiment directory: {exp_dir}")
-        return exp_dir
-    except Exception as exc:
-        print(f"Warning: could not create experiment directory: {exc}")
-        return None
 
 
 def _get_best_val_bpb(results_tsv_path):
@@ -1282,98 +1248,12 @@ def _get_best_val_bpb(results_tsv_path):
         return None
 
 
-def _save_experiment_artifacts(exp_dir, checkpoint_path, results_tsv_path, program_md_path, val_bpb=None, step=None, config=None, runtime=None, args=None):
-    """Copy/create experiment artifacts to the experiment directory."""
-    if exp_dir is None:
-        return
-
-    try:
-        print(f"Saving experiment artifacts to {exp_dir}")
-        print(f"  checkpoint_path: {checkpoint_path}")
-        print(f"  results_tsv_path: {results_tsv_path}")
-        print(f"  program_md_path: {program_md_path}")
-
-        # Checkpoint is already saved to exp_dir by _save_pre_eval_checkpoint
-        # Only copy if checkpoint_path is different from exp_dir/checkpoint.pt
-        if checkpoint_path and os.path.exists(checkpoint_path):
-            exp_checkpoint_path = exp_dir / "checkpoint.pt"
-            if os.path.abspath(checkpoint_path) != os.path.abspath(exp_checkpoint_path):
-                shutil.copy2(checkpoint_path, exp_checkpoint_path)
-                print(f"Copied checkpoint to {exp_checkpoint_path}")
-            else:
-                print(f"Checkpoint already in experiment directory: {exp_checkpoint_path}")
-        elif checkpoint_path:
-            print(f"Warning: checkpoint_path exists but file not found: {checkpoint_path}")
-        else:
-            print("Note: no checkpoint_path provided (val_bpb did not improve or is first run)")
-
-        # Copy global results.tsv if it exists (for provenance)
-        if results_tsv_path and os.path.exists(results_tsv_path):
-            shutil.copy2(results_tsv_path, exp_dir / "results.tsv.global")
-            print(f"Copied global results.tsv to {exp_dir / 'results.tsv.global'}")
-
-        # Copy program.md if it exists
-        if program_md_path:
-            print(f"Checking program.md path: {program_md_path}, exists: {os.path.exists(program_md_path)}")
-            if os.path.exists(program_md_path):
-                shutil.copy2(program_md_path, exp_dir / "program.md")
-                print(f"Copied program.md to {exp_dir / 'program.md'}")
-            else:
-                print(f"Warning: program.md not found at {program_md_path}")
-                # Try to find program.md in the current directory as a fallback
-                fallback_path = Path(__file__).parent / "program.md"
-                if os.path.exists(fallback_path):
-                    shutil.copy2(fallback_path, exp_dir / "program.md")
-                    print(f"Copied program.md from fallback path: {fallback_path}")
-        else:
-            print("Note: program_md_path is None")
-
-        # Save git log output
-        try:
-            git_log = subprocess.run(
-                ["git", "log", "-1"],
-                capture_output=True,
-                text=True,
-                check=True,
-            ).stdout
-            (exp_dir / "git_log.txt").write_text(git_log)
-            print(f"Saved git log to {exp_dir / 'git_log.txt'}")
-        except (subprocess.CalledProcessError, FileNotFoundError) as e:
-            print(f"Warning: could not save git log output: {e}")
-
-        # Save run metadata
-        if runtime is not None and config is not None:
-            run_metadata = {
-                "timestamp": exp_dir.name,
-                "val_bpb": val_bpb,
-                "step": step,
-                "config": asdict(config),
-                "runtime": {
-                    "gpu_name": runtime.gpu_name,
-                    "gpu_vram_gb": runtime.gpu_vram_gb,
-                    "gpu_cc": runtime.gpu_cc,
-                    "amp_dtype": str(runtime.amp_dtype),
-                },
-                "args": {
-                    "smoke_test": args.smoke_test if args else False,
-                    "dataset": args.dataset if args else None,
-                } if args else None,
-            }
-            (exp_dir / "run_metadata.json").write_text(json.dumps(run_metadata, indent=2))
-            print(f"Saved run metadata to {exp_dir / 'run_metadata.json'}")
-
-    except Exception as exc:
-        print(f"Warning: could not copy/some experiment artifacts: {exc}")
-
-
 def main():
     parser = argparse.ArgumentParser(description="Autoresearch training script")
     parser.add_argument("--smoke-test", action="store_true", help="Run a short train/eval pass for validation.")
     parser.add_argument("--dataset", choices=DATASET_CHOICES, default=None, help="Optional dataset override.")
+    parser.add_argument("--exp-dir", type=str, default=None, help="Experiment directory for checkpoint (optional).")
     args = parser.parse_args()
-
-    # Create experiment directory at the start
-    exp_dir = _create_experiment_dir()
 
     runtime = detect_runtime()
     print(f"GPU: {runtime.gpu_name}")
@@ -1483,10 +1363,9 @@ def main():
         return 1
 
     # Save checkpoint only if val_bpb improved (lower than best previous)
-    checkpoint_path = None
     if best_val_bpb is None or val_bpb < best_val_bpb:
         print(f"val_bpb improved! ({best_val_bpb if best_val_bpb is not None else 'N/A'} -> {val_bpb:.6f})")
-        checkpoint_path = _save_pre_eval_checkpoint(model, exp_dir)
+        checkpoint_path = _save_pre_eval_checkpoint(model, args.exp_dir)
     else:
         print(f"val_bpb did not improve ({best_val_bpb:.6f} -> {val_bpb:.6f}) - skipping checkpoint save")
 
@@ -1529,19 +1408,6 @@ def main():
     print(f"activation_checkpointing: {'enabled' if chosen_checkpointing else 'disabled'}")
     if args.smoke_test:
         print("smoke_test:       true")
-
-    # Save all experiment artifacts to the experiment directory
-    _save_experiment_artifacts(
-        exp_dir,
-        checkpoint_path,
-        str(Path(__file__).parent / "results.tsv"),
-        str(Path(__file__).parent / "program.md"),
-        val_bpb=val_bpb,
-        step=step,
-        config=config,
-        runtime=runtime,
-        args=args,
-    )
 
     return 0
 
