@@ -1,5 +1,5 @@
 # CPU-only Dockerfile for AutoResearch SDPA Inference API
-# Builds a self-contained image with tokenizer included (no external dependencies)
+# tokenizer and checkpoints are provided via volume mounts
 # Designed for K8s deployment with non-root user (UID 1000)
 
 FROM python:3.10-slim
@@ -12,6 +12,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     DEVICE=cpu \
     AUTORESEARCH_CACHE_DIR=/app/cache \
+    AUTORESEARCH_CHECKPOINTS_DIR=/app/checkpoints \
     PATH="/usr/local/bin:${PATH}"
 
 # Install system dependencies
@@ -30,11 +31,11 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
 # User UID 1000 as required by K8s securityContext.runAsUser
 RUN useradd -m -u 1000 inference
 
-# Copy prepare.py and inference.py for tokenizer training
+# Copy prepare.py and inference.py (for tokenizer loading support)
 COPY --chown=inference:inference prepare.py .
 COPY --chown=inference:inference inference.py .
 
-# Install ALL Python dependencies first (including torch for prepare.py)
+# Install ALL Python dependencies (torch, data processing, etc.)
 # numpy is required by PyTorch (torch imports numpy internally)
 # Split install: torch from PyTorch index, others from PyPI
 RUN uv pip install --system \
@@ -46,28 +47,14 @@ RUN uv pip install --system \
     rustbpe==0.1.0 \
     tiktoken==0.11.0
 
-# Run prepare.py to download data and train tokenizer
-# This downloads TinyStories (~60MB) and trains a BPE tokenizer
-# Runs as root but cache will be accessible to inference user
-RUN python prepare.py \
-    && echo "Prepare completed successfully"
-
 # Copy API server
 COPY --chown=inference:inference api_server.py .
 
 # Install FastAPI dependencies
 RUN uv pip install --system fastapi uvicorn[standard] pydantic==2.10.6 starlette typing-extensions
 
-# Create checkpoints directory with correct ownership
-RUN mkdir -p /app/checkpoints && chown inference:inference /app/checkpoints
-
-# Verify tokenizer exists
-RUN if [ -f /app/cache/datasets/tinystories/tokenizer/tokenizer.pkl ]; then \
-        echo "Tokenizer found at /app/cache/datasets/tinystories/tokenizer/tokenizer.pkl"; \
-    else \
-        echo "ERROR: Tokenizer not found after prepare.py"; \
-        exit 1; \
-    fi
+# Create directories for volume mounts with correct ownership
+RUN mkdir -p /app/cache /app/checkpoints && chown inference:inference /app/cache /app/checkpoints
 
 # Switch to non-root user for running the application
 USER inference
@@ -80,5 +67,5 @@ HEALTHCHECK --interval=60s --timeout=10s --start-period=120s --retries=3 \
 # Expose API port
 EXPOSE 8000
 
-# Run the FastAPI server using uv run (matches reference Dockerfile pattern)
-CMD ["uv", "run", "python", "api_server.py", "--host", "0.0.0.0", "--port", "8000"]
+# Run the FastAPI server
+CMD ["python", "api_server.py", "--host", "0.0.0.0", "--port", "8000"]

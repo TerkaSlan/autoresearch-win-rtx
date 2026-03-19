@@ -1288,15 +1288,35 @@ def _save_experiment_artifacts(exp_dir, checkpoint_path, results_tsv_path, progr
         return
 
     try:
-        # Copy checkpoint to experiment directory
+        print(f"Saving experiment artifacts to {exp_dir}")
+        print(f"  checkpoint_path: {checkpoint_path}")
+        print(f"  results_tsv_path: {results_tsv_path}")
+        print(f"  program_md_path: {program_md_path}")
+
+        # Checkpoint is already saved to exp_dir by _save_pre_eval_checkpoint
+        # Only copy if checkpoint_path is different from exp_dir/checkpoint.pt
         if checkpoint_path and os.path.exists(checkpoint_path):
-            shutil.copy2(checkpoint_path, exp_dir / "checkpoint.pt")
-            print(f"Copied checkpoint to {exp_dir / 'checkpoint.pt'}")
+            exp_checkpoint_path = exp_dir / "checkpoint.pt"
+            if os.path.abspath(checkpoint_path) != os.path.abspath(exp_checkpoint_path):
+                shutil.copy2(checkpoint_path, exp_checkpoint_path)
+                print(f"Copied checkpoint to {exp_checkpoint_path}")
+            else:
+                print(f"Checkpoint already in experiment directory: {exp_checkpoint_path}")
+        elif checkpoint_path:
+            print(f"Warning: checkpoint_path exists but file not found: {checkpoint_path}")
+        else:
+            print("Note: no checkpoint_path provided (val_bpb did not improve or is first run)")
 
         # Copy global results.tsv if it exists
-        if results_tsv_path and os.path.exists(results_tsv_path):
-            shutil.copy2(results_tsv_path, exp_dir / "results.tsv.global")
-            print(f"Copied global results.tsv to {exp_dir / 'results.tsv.global'}")
+        if results_tsv_path:
+            print(f"Checking results.tsv path: {results_tsv_path}, exists: {os.path.exists(results_tsv_path)}")
+            if os.path.exists(results_tsv_path):
+                shutil.copy2(results_tsv_path, exp_dir / "results.tsv.global")
+                print(f"Copied global results.tsv to {exp_dir / 'results.tsv.global'}")
+            else:
+                print("Note: global results.tsv does not exist (first run?)")
+        else:
+            print("Note: results_tsv_path is None")
 
         # Create results.tsv entry for this run
         if val_bpb is not None and config is not None:
@@ -1308,11 +1328,24 @@ def _save_experiment_artifacts(exp_dir, checkpoint_path, results_tsv_path, progr
             results_content = f"{results_header}{tab}{timestamp}{tab}{val_bpb:.6f}{tab}{step}{tab}{config.n_layer}{tab}{config.vocab_size}{tab}{config.n_embd}{tab}{config.n_head}{tab}{config.n_kv_head}{tab}{config.use_activation_checkpointing}{tab}-{tab}-{tab}{dataset}"
             results_file.write_text(results_content)
             print(f"Created run-specific results.tsv: {exp_dir / 'results.tsv'}")
+        else:
+            print(f"Skipping results.tsv creation: val_bpb={val_bpb}, config={config is not None}")
 
         # Copy program.md if it exists
-        if program_md_path and os.path.exists(program_md_path):
-            shutil.copy2(program_md_path, exp_dir / "program.md")
-            print(f"Copied program.md to {exp_dir / 'program.md'}")
+        if program_md_path:
+            print(f"Checking program.md path: {program_md_path}, exists: {os.path.exists(program_md_path)}")
+            if os.path.exists(program_md_path):
+                shutil.copy2(program_md_path, exp_dir / "program.md")
+                print(f"Copied program.md to {exp_dir / 'program.md'}")
+            else:
+                print(f"Warning: program.md not found at {program_md_path}")
+                # Try to find program.md in the current directory as a fallback
+                fallback_path = Path(__file__).parent / "program.md"
+                if os.path.exists(fallback_path):
+                    shutil.copy2(fallback_path, exp_dir / "program.md")
+                    print(f"Copied program.md from fallback path: {fallback_path}")
+        else:
+            print("Note: program_md_path is None")
 
         # Save git log output
         try:
@@ -1324,8 +1357,8 @@ def _save_experiment_artifacts(exp_dir, checkpoint_path, results_tsv_path, progr
             ).stdout
             (exp_dir / "git_log.txt").write_text(git_log)
             print(f"Saved git log to {exp_dir / 'git_log.txt'}")
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            print("Warning: could not save git log output")
+        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+            print(f"Warning: could not save git log output: {e}")
 
         # Save run metadata
         if runtime is not None and config is not None:

@@ -10,11 +10,14 @@ Features:
 """
 
 import os
+import json
 import pickle
+import subprocess
 import torch
 from typing import Optional
 from pathlib import Path
 from contextlib import asynccontextmanager
+from collections import namedtuple
 
 # Import FastAPI and related components
 try:
@@ -198,6 +201,49 @@ class ReloadModelResponse(BaseModel):
     message: str = Field(description="Detailed message")
 
 
+class GitLogCommit(BaseModel):
+    """Represents a single commit from git log."""
+    commit_sha: str = Field(description="Full commit SHA")
+    commit_short: str = Field(description="Short commit SHA (7 chars)")
+    author: str = Field(description="Commit author")
+    date: str = Field(description="Commit date")
+    message: str = Field(description="Commit message")
+
+
+class ExperimentInfoResponse(BaseModel):
+    """Response model for experiment info."""
+    exp_dir: str = Field(description="Experiment directory name")
+    checkpoint_path: str = Field(description="Path to checkpoint.pt file")
+    has_checkpoint: bool = Field(description="Whether checkpoint.pt exists")
+    has_program: bool = Field(description="Whether program.md exists")
+    has_results: bool = Field(description="Whether results.tsv exists")
+    has_git_log: bool = Field(description="Whether git_log.txt exists")
+    has_global_results: bool = Field(description="Whether results.tsv.global exists")
+    has_metadata: bool = Field(description="Whether run_metadata.json exists")
+    git_log: Optional[list[GitLogCommit]] = Field(default=None, description="Git commit history from git_log.txt")
+    results_data: Optional[dict] = Field(default=None, description="Parsed results.tsv data")
+    metadata: Optional[dict] = Field(default=None, description="Parsed run_metadata.json")
+
+
+class LatestExperimentResponse(BaseModel):
+    """Response model for latest experiment."""
+    exp_dir: str = Field(description="Latest experiment directory")
+    checkpoint_path: str = Field(description="Path to checkpoint.pt in latest experiment")
+
+
+class ExperimentDir(BaseModel):
+    """Represents a single experiment directory."""
+    name: str = Field(description="Experiment directory name")
+    checkpoint_path: str = Field(description="Path to checkpoint.pt")
+    has_checkpoint: bool = Field(description="Whether checkpoint.pt exists")
+
+
+class ExperimentListResponse(BaseModel):
+    """Response model for experiment list."""
+    experiments: list[ExperimentDir] = Field(description="List of experiment directories")
+    count: int = Field(description="Total number of experiments")
+
+
 # ==========================================
 # Global State
 # ==========================================
@@ -221,6 +267,226 @@ tokenizer_ready = False
 model_error = None
 tokenizer_error = None
 checkpoint_path_used = None
+
+# Checkpoints directory
+CHECKPOINTS_BASE_PATH = os.environ.get(
+    "AUTORESEARCH_CHECKPOINTS_DIR",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "checkpoints")
+)
+
+
+# ==========================================
+# Helper Functions for Experiment Directories
+# ==========================================
+
+
+def _parse_git_log(git_log_path: Path) -> list[GitLogCommit]:
+    """Parse git_log.txt and return list of commits.
+
+    Args:
+        git_log_path: Path to git_log.txt file
+
+    Returns:
+        List of GitLogCommit objects
+    """
+    commits = []
+    if not git_log_path.exists():
+        return commits
+
+    content = git_log_path.read_text()
+
+    # Parse git log format:
+    # commit <sha>
+    # Author: <name>
+    # Date:   <date>
+    #
+    # <message>
+    lines = content.split('\n')
+    current_commit = None
+
+    for line in lines:
+        line = line.rstrip()
+        if line.startswith('commit '):
+            if current_commit:
+                commits.append(current_commit)
+            sha = line.split(' ')[1].strip()
+            current_commit = {
+                'commit_sha': sha,
+                'commit_short': sha[:7] if len(sha) >= 7 else sha,
+                'author': '',
+                'date': '',
+                'message': ''
+            }
+        elif line.startswith('Author: '):
+            if current_commit:
+                current_commit['author'] = line.replace('Author: ', '').strip()
+        elif line.startswith('Date:   '):
+            if current_commit:
+                current_commit['date'] = line.replace('Date:   ', '').strip()
+        elif current_commit and line and not line.startswith('\t'):
+            if current_commit['message']:
+                current_commit['message'] += '\n'
+            current_commit['message'] += line
+        elif line.startswith('\t') and current_commit:
+            if current_commit['message']:
+                current_commit['message'] += '\n'
+            current_commit['message'] += line[1:]
+
+    if current_commit:
+        commits.append(current_commit)
+
+    return [GitLogCommit(**commit) for commit in commits]
+
+
+def _parse_results_tsv(results_path: Path) -> Optional[dict]:
+    """Parse results.tsv file.
+
+    Args:
+        results_path: Path to results.tsv file
+
+    Returns:
+        Dict with header and data rows, or None if file doesn't exist
+    """
+    if not results_path.exists():
+        return None
+
+    content = results_path.read_text()
+    lines = [line.rstrip() for line in content.split('\n') if line.strip()]
+
+    if not lines:
+        return {'header': [], 'rows': []}
+
+    return {
+        'header': lines[0].split('\t'),
+        'rows': [row.split('\t') for row in lines[1:]]
+    }
+
+
+def _get_exp_dir_path(exp_dir_name: str) -> Path:
+    """Get the full path to an experiment directory.
+
+    Args:
+        exp_dir_name: Name of the experiment directory
+
+    Returns:
+        Path to the experiment directory
+    """
+    return Path(CHECKPOINTS_BASE_PATH) / exp_dir_name
+
+
+def _get_latest_experiment_dir() -> Optional[str]:
+    """Find the most recent experiment directory.
+
+    Looks for directories in CHECKPOINTS_BASE_PATH that start with a year (e.g., 2026...).
+
+    Returns:
+        Latest experiment directory name, or None if no directories found
+    """
+    base_path = Path(CHECKPOINTS_BASE_PATH)
+    if not base_path.exists():
+        return None
+
+    # Find all directories that start with 2026 (or current year pattern)
+    exp_dirs = []
+    for item in base_path.iterdir():
+        if item.is_dir():
+            name = item.name
+            # Check if directory name starts with year pattern (YYYYMMDD)
+            if name[:4].isdigit() and len(name) >= 8:
+                try:
+                    exp_dirs.append((name, item))
+                except (ValueError, IndexError):
+                    continue
+
+    if not exp_dirs:
+        return None
+
+    # Sort by directory name (which contains timestamp), get latest
+    exp_dirs.sort(key=lambda x: x[0], reverse=True)
+    return exp_dirs[0][0]
+
+
+def _list_experiment_dirs() -> list[dict]:
+    """List all experiment directories.
+
+    Returns:
+        List of dicts with experiment directory info
+
+    Raises:
+        FileNotFoundError: If checkpoints directory doesn't exist
+    """
+    base_path = Path(CHECKPOINTS_BASE_PATH)
+    if not base_path.exists():
+        raise FileNotFoundError(f"Checkpoints directory not found: {CHECKPOINTS_BASE_PATH}")
+
+    experiments = []
+    for item in base_path.iterdir():
+        if item.is_dir():
+            name = item.name
+            # Check if directory name starts with year pattern (YYYYMMDD)
+            if name[:4].isdigit() and len(name) >= 8:
+                exp_dir_path = item
+                checkpoint_path = exp_dir_path / "checkpoint.pt"
+                experiments.append({
+                    'name': name,
+                    'checkpoint_path': str(checkpoint_path),
+                    'has_checkpoint': checkpoint_path.exists()
+                })
+
+    # Sort by directory name (timestamp) descending
+    experiments.sort(key=lambda x: x['name'], reverse=True)
+    return experiments
+
+
+def _get_exp_dir_info(exp_dir_name: str) -> dict:
+    """Gather information about an experiment directory.
+
+    Args:
+        exp_dir_name: Name of the experiment directory
+
+    Returns:
+        Dict with file existence status and parsed data
+
+    Raises:
+        FileNotFoundError: If experiment directory doesn't exist
+    """
+    exp_dir = _get_exp_dir_path(exp_dir_name)
+
+    if not exp_dir.exists():
+        raise FileNotFoundError(f"Experiment directory not found: {exp_dir}")
+
+    checkpoint_path = exp_dir / "checkpoint.pt"
+    program_path = exp_dir / "program.md"
+    results_path = exp_dir / "results.tsv"
+    git_log_path = exp_dir / "git_log.txt"
+    global_results_path = exp_dir / "results.tsv.global"
+    metadata_path = exp_dir / "run_metadata.json"
+
+    info = {
+        'exp_dir': exp_dir_name,
+        'checkpoint_path': str(checkpoint_path),
+        'has_checkpoint': checkpoint_path.exists(),
+        'has_program': program_path.exists(),
+        'has_results': results_path.exists(),
+        'has_git_log': git_log_path.exists(),
+        'has_global_results': global_results_path.exists(),
+        'has_metadata': metadata_path.exists(),
+    }
+
+    # Parse git log if exists
+    if git_log_path.exists():
+        info['git_log'] = _parse_git_log(git_log_path)
+
+    # Parse results.tsv if exists
+    if results_path.exists():
+        info['results_data'] = _parse_results_tsv(results_path)
+
+    # Parse metadata if exists
+    if metadata_path.exists():
+        with open(metadata_path, 'r') as f:
+            info['metadata'] = json.load(f)
+
+    return info
 
 
 # ==========================================
@@ -401,15 +667,21 @@ async def root():
         "device": device,
         "dataset": dataset_name,
         "default_checkpoint": DEFAULT_CHECKPOINT,
+        "checkpoints_base_path": CHECKPOINTS_BASE_PATH,
         "features": {
             "text_generation": True,
             "text_prompting": True,
             "token_prompting": True,
+            "experiment_tracking": True,
         },
         "endpoints": {
             "health": "/health",
             "generate": "/generate (POST) - Generate text from prompt or tokens",
             "reload_model": "/reload_model (POST)",
+            "list": "/list - List all experiment directories",
+            "latest": "/latest - Get latest experiment directory",
+            "info": "/info - Get info about latest experiment",
+            "info_exp_dir": "/info/{exp_dir} - Get info about specific experiment",
             "docs": "/docs - Swagger UI documentation",
             "redoc": "/redoc - ReDoc documentation",
         },
@@ -585,6 +857,135 @@ async def generate_text(request: GenerateRequest):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}")
+
+
+@app.get("/list", response_model=ExperimentListResponse)
+async def list_experiments():
+    """List all experiment directories.
+
+    Returns a list of all experiment directories in the checkpoints folder.
+
+    Returns:
+        List of experiment directories with checkpoint paths and status
+
+    Raises:
+        HTTPException: If checkpoints directory doesn't exist
+    """
+    try:
+        experiments = _list_experiment_dirs()
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    return ExperimentListResponse(
+        experiments=[ExperimentDir(**exp) for exp in experiments],
+        count=len(experiments)
+    )
+
+
+@app.get("/latest", response_model=LatestExperimentResponse)
+async def get_latest_exp():
+    """Get the latest experiment directory.
+
+    Finds the most recent experiment directory in the checkpoints folder.
+    Directories are expected to be named with timestamp format: YYYYMMDD_HHMMSS-<commit_short>
+
+    Returns:
+        Latest experiment directory name and checkpoint path
+
+    Raises:
+        HTTPException: If no experiment directories found
+    """
+    latest = _get_latest_experiment_dir()
+    if latest is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No experiment directories found in {CHECKPOINTS_BASE_PATH}"
+        )
+
+    exp_dir = _get_exp_dir_path(latest)
+    checkpoint_path = exp_dir / "checkpoint.pt"
+
+    return LatestExperimentResponse(
+        exp_dir=latest,
+        checkpoint_path=str(checkpoint_path)
+    )
+
+
+@app.get("/info/{exp_dir}", response_model=ExperimentInfoResponse)
+async def get_exp_info(exp_dir: str):
+    """Get information about a specific experiment directory.
+
+    Returns the contents of checkpoint.pt, program.md, results.tsv, and git_log.txt
+    from the experiment directory.
+
+    Args:
+        exp_dir: The experiment directory name (e.g., "20260318_182856-dd7f7fa")
+
+    Returns:
+        Experiment info including file existence status, git log, and parsed results
+
+    Raises:
+        HTTPException: If experiment directory not found
+    """
+    try:
+        info = _get_exp_dir_info(exp_dir)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    return ExperimentInfoResponse(
+        exp_dir=info['exp_dir'],
+        checkpoint_path=info['checkpoint_path'],
+        has_checkpoint=info['has_checkpoint'],
+        has_program=info['has_program'],
+        has_results=info['has_results'],
+        has_git_log=info['has_git_log'],
+        has_global_results=info['has_global_results'],
+        has_metadata=info['has_metadata'],
+        git_log=info.get('git_log'),
+        results_data=info.get('results_data'),
+        metadata=info.get('metadata')
+    )
+
+
+@app.get("/info", response_model=ExperimentInfoResponse)
+async def get_latest_exp_info():
+    """Get information about the latest experiment directory.
+
+    This is a convenience endpoint that combines /latest and /info/{exp_dir}.
+    Returns the contents of the latest experiment's checkpoint.pt, program.md,
+    results.tsv, and git_log.txt files.
+
+    Returns:
+        Latest experiment info including file existence status, git log, and parsed results
+
+    Raises:
+        HTTPException: If no experiment directories found
+    """
+    latest = _get_latest_experiment_dir()
+    if latest is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No experiment directories found in {CHECKPOINTS_BASE_PATH}"
+        )
+
+    try:
+        info = _get_exp_dir_info(latest)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    return ExperimentInfoResponse(
+        exp_dir=info['exp_dir'],
+        checkpoint_path=info['checkpoint_path'],
+        has_checkpoint=info['has_checkpoint'],
+        has_program=info['has_program'],
+        has_results=info['has_results'],
+        has_git_log=info['has_git_log'],
+        has_global_results=info['has_global_results'],
+        has_metadata=info['has_metadata'],
+        git_log=info.get('git_log'),
+        results_data=info.get('results_data'),
+        metadata=info.get('metadata')
+    )
 
 
 # ==========================================

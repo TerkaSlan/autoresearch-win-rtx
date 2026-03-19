@@ -19,6 +19,7 @@ RUN apt-get update && apt-get install -y \
     python3.10-dev \
     python3-pip \
     python3.10-distutils \
+    git \
     tmux \
     curl \
     vim \
