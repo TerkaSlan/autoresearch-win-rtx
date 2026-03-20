@@ -1252,7 +1252,6 @@ def main():
     parser = argparse.ArgumentParser(description="Autoresearch training script")
     parser.add_argument("--smoke-test", action="store_true", help="Run a short train/eval pass for validation.")
     parser.add_argument("--dataset", choices=DATASET_CHOICES, default=None, help="Optional dataset override.")
-    parser.add_argument("--exp-dir", type=str, default=None, help="Experiment directory for checkpoint (optional).")
     args = parser.parse_args()
 
     runtime = detect_runtime()
@@ -1365,7 +1364,8 @@ def main():
     # Save checkpoint only if val_bpb improved (lower than best previous)
     if best_val_bpb is None or val_bpb < best_val_bpb:
         print(f"val_bpb improved! ({best_val_bpb if best_val_bpb is not None else 'N/A'} -> {val_bpb:.6f})")
-        checkpoint_path = _save_pre_eval_checkpoint(model, args.exp_dir)
+        checkpoint_path = _save_pre_eval_checkpoint(model)
+        print(f"CHECKPOINT_SAVED:{checkpoint_path}")
     else:
         print(f"val_bpb did not improve ({best_val_bpb:.6f} -> {val_bpb:.6f}) - skipping checkpoint save")
 

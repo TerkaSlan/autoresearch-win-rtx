@@ -7,12 +7,14 @@ Features:
 - /health endpoint - check server and model status
 - /generate endpoint - generate text (returns both tokens and decoded text)
 - Automatic checkpoint loading from environment or file
+- File-based caching for fast repeated requests
 """
 
 import os
 import json
 import pickle
 import subprocess
+import hashlib
 import torch
 from typing import Optional
 from pathlib import Path
@@ -21,7 +23,7 @@ from collections import namedtuple
 
 # Import FastAPI and related components
 try:
-    from fastapi import FastAPI, HTTPException, status
+    from fastapi import FastAPI, HTTPException, status, Depends, Header
     from fastapi.middleware.cors import CORSMiddleware
     from pydantic import BaseModel, Field
     FASTAPI_AVAILABLE = True
@@ -38,6 +40,91 @@ DEFAULT_CHECKPOINT = os.environ.get(
     "AUTORESEARCH_CHECKPOINT",
     os.environ.get("DEFAULT_CHECKPOINT", "checkpoints/checkpoint_best.pt")
 )
+
+# Cache directory for storing responses
+CACHE_DIR = os.environ.get("AUTORESEARCH_CACHE_DIR", "/app/cache")
+
+# API Key for authentication (set via environment variable)
+API_KEY = os.environ.get("AUTORESEARCH_API_KEY", "")
+
+
+# ==========================================
+# API Key Authentication
+# ==========================================
+
+async def verify_api_key(x_api_key: str = Header(None)):
+    """Verify API key from header."""
+    if not API_KEY:
+        # No API key configured - allow all requests (development mode)
+        return True
+
+    if not x_api_key or x_api_key != API_KEY:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing API key"
+        )
+
+    return True
+
+# ==========================================
+# File-based Cache
+# ==========================================
+
+class FileCache:
+    """Simple file-based cache that persists to disk."""
+
+    def __init__(self, cache_dir: str):
+        self.cache_dir = Path(cache_dir)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        print(f"Cache initialized at: {self.cache_dir}")
+
+    def _get_cache_path(self, key: str) -> Path:
+        """Get the file path for a cache key."""
+        key_hash = hashlib.sha256(key.encode()).hexdigest()[:16]
+        return self.cache_dir / f"{key_hash}.json"
+
+    def get(self, key: str) -> Optional[dict]:
+        """Get cached response if exists."""
+        cache_path = self._get_cache_path(key)
+        if cache_path.exists():
+            try:
+                with open(cache_path, 'r') as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, IOError) as e:
+                print(f"Cache read error for {key}: {e}")
+                return None
+        return None
+
+    def set(self, key: str, value: dict) -> None:
+        """Store response in cache."""
+        cache_path = self._get_cache_path(key)
+        try:
+            with open(cache_path, 'w') as f:
+                json.dump(value, f)
+        except IOError as e:
+            print(f"Cache write error for {key}: {e}")
+
+    def clear(self) -> int:
+        """Clear all cache entries."""
+        cleared = 0
+        for cache_file in self.cache_dir.glob("*.json"):
+            cache_file.unlink()
+            cleared += 1
+        return cleared
+
+    def get_stats(self) -> dict:
+        """Get cache statistics."""
+        files = list(self.cache_dir.glob("*.json"))
+        total_size = sum(f.stat().st_size for f in files)
+        return {
+            "cache_dir": str(self.cache_dir),
+            "entries": len(files),
+            "total_size_bytes": total_size,
+            "total_size_mb": round(total_size / (1024 * 1024), 2)
+        }
+
+# Global cache instance
+cache = None
 
 # ==========================================
 # Tokenizer Loading (from prepare.py cache)
@@ -162,6 +249,8 @@ class GenerateRequest(BaseModel):
         default=None,
         description="Optional prompt tokens as list of ints. Default: BOS token"
     )
+    # Checkpoint to use for generation
+    checkpoint: Optional[str] = Field(default=None, description="Path to checkpoint file to use for generation")
 
 
 class GenerateResponse(BaseModel):
@@ -472,6 +561,7 @@ def _get_exp_dir_info(exp_dir_name: str) -> dict:
         'has_checkpoint': has_checkpoint,
         'has_program': program_path.exists(),
         'has_results': results_global_path.exists(),
+        'has_global_results': results_global_path.exists(),
         'has_git_log': git_log_path.exists(),
         'has_metadata': metadata_path.exists(),
     }
@@ -613,12 +703,18 @@ app.add_middleware(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifespan - load model and tokenizer on startup."""
+    global cache
     print("=" * 70)
     print("AutoResearch SDPA Inference API Starting...")
     print(f"Device: {device}")
     print(f"Dataset: {dataset or 'auto-resolve'}")
     print(f"Default checkpoint: {DEFAULT_CHECKPOINT}")
+    print(f"Cache directory: {CACHE_DIR}")
     print("=" * 70)
+
+    # Initialize cache
+    cache = FileCache(CACHE_DIR)
+    print(f"Cache initialized: {cache.get_stats()}")
 
     # Load tokenizer
     try:
@@ -722,7 +818,7 @@ async def health():
 
 
 @app.post("/reload_model", response_model=ReloadModelResponse)
-async def reload_model(request: ReloadModelRequest):
+async def reload_model(request: ReloadModelRequest, _: bool = Depends(verify_api_key)):
     """Reload model from a new checkpoint.
 
     This endpoint allows loading a different checkpoint without restarting the server.
@@ -769,16 +865,21 @@ async def reload_model(request: ReloadModelRequest):
 
 
 @app.post("/generate", response_model=GenerateResponse)
-async def generate_text(request: GenerateRequest):
+async def generate_text(request: GenerateRequest, _: bool = Depends(verify_api_key)):
     """Generate text from the loaded model.
 
     The model generates text autoregressively based on the model's learned distribution.
+    Results are cached indefinitely for repeated requests with same parameters.
 
     **Text-based prompting** (recommended for most use cases):
     Provide a `prompt` string to continue from that text.
 
     **Token-based prompting** (advanced):
     Provide `prompt_tokens` as a list of token IDs. Omit or use `null` BOS token.
+
+    **Checkpoint selection**:
+    Provide `checkpoint` path to use a specific model checkpoint.
+    If not provided, uses the currently loaded model.
 
     Args:
         request: Generation parameters including max_tokens, temperature, sampling params, and prompt
@@ -789,11 +890,7 @@ async def generate_text(request: GenerateRequest):
     Raises:
         HTTPException: If model/tokenizer is not loaded or generation fails
     """
-    if model is None or not model_ready:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Model not ready for inference. Error: {model_error}"
-        )
+    global model, config_dict, metrics_dict, model_ready, model_error, checkpoint_path_used
 
     if tokenizer is None or not tokenizer_ready:
         raise HTTPException(
@@ -801,6 +898,53 @@ async def generate_text(request: GenerateRequest):
             detail=f"Tokenizer not ready. Error: {tokenizer_error}. "
                     f"Run 'python prepare.py' to train the tokenizer."
         )
+
+    # Determine which checkpoint to use
+    target_checkpoint = request.checkpoint if request.checkpoint else checkpoint_path_used
+
+    if not target_checkpoint:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="No checkpoint specified and no default model loaded"
+        )
+
+    # Load the checkpoint if different from current
+    if target_checkpoint != checkpoint_path_used:
+        try:
+            print(f"Loading checkpoint: {target_checkpoint}")
+            load_model_from_checkpoint(target_checkpoint)
+            print(f"Loaded checkpoint: {checkpoint_path_used}")
+        except FileNotFoundError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to load checkpoint: {str(e)}")
+
+    if model is None or not model_ready:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Model not ready for inference. Error: {model_error}"
+        )
+
+    # Build cache key from request parameters and checkpoint
+    cache_key_parts = [
+        f"checkpoint:{target_checkpoint}",
+        f"prompt:{request.prompt or ''}",
+        f"prompt_tokens:{request.prompt_tokens or []}",
+        f"max_tokens:{request.max_tokens}",
+        f"temperature:{request.temperature}",
+        f"top_k:{request.top_k}",
+        f"top_p:{request.top_p}",
+        f"seed:{request.seed}",
+    ]
+    cache_key = "|".join(str(p) for p in cache_key_parts)
+
+    # Check cache first
+    if cache is not None:
+        cached_response = cache.get(cache_key)
+        if cached_response:
+            print(f"Cache HIT for generate request (checkpoint: {target_checkpoint})")
+            return GenerateResponse(**cached_response)
+        print(f"Cache MISS for generate request (checkpoint: {target_checkpoint})")
 
     # Set random seed if provided for reproducibility
     if request.seed is not None:
@@ -850,20 +994,27 @@ async def generate_text(request: GenerateRequest):
                 else:
                     config_used_serializable[k] = v
 
-        return GenerateResponse(
-            generated_text=generated_text,
-            generated_tokens=generated_tokens,
-            num_tokens=len(generated_tokens),
-            prompt_used=prompt_text_used,
-            config_used=config_used_serializable,
-        )
+        response_data = {
+            'generated_text': generated_text,
+            'generated_tokens': generated_tokens,
+            'num_tokens': len(generated_tokens),
+            'prompt_used': prompt_text_used,
+            'config_used': config_used_serializable,
+        }
+
+        # Cache the response
+        if cache is not None:
+            cache.set(cache_key, response_data)
+            print(f"Cached generate response for checkpoint: {target_checkpoint}")
+
+        return GenerateResponse(**response_data)
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}")
 
 
 @app.get("/list", response_model=ExperimentListResponse)
-async def list_experiments():
+async def list_experiments(_: bool = Depends(verify_api_key)):
     """List all experiment directories.
 
     Returns a list of all experiment directories in the checkpoints folder.
@@ -886,7 +1037,7 @@ async def list_experiments():
 
 
 @app.get("/latest", response_model=LatestExperimentResponse)
-async def get_latest_exp():
+async def get_latest_exp(_: bool = Depends(verify_api_key)):
     """Get the latest experiment directory with a checkpoint.
 
     Finds the most recent experiment directory in the checkpoints folder that
@@ -916,11 +1067,11 @@ async def get_latest_exp():
 
 
 @app.get("/info/{exp_dir}", response_model=ExperimentInfoResponse)
-async def get_exp_info(exp_dir: str):
+async def get_exp_info(exp_dir: str, _: bool = Depends(verify_api_key)):
     """Get information about a specific experiment directory.
 
     Returns the contents of checkpoint.pt, program.md, results.tsv, and git_log.txt
-    from the experiment directory.
+    from the experiment directory. Results are cached indefinitely.
 
     Args:
         exp_dir: The experiment directory name (e.g., "20260318_182856-dd7f7fa")
@@ -931,28 +1082,44 @@ async def get_exp_info(exp_dir: str):
     Raises:
         HTTPException: If experiment directory not found
     """
+    # Check cache first
+    cache_key = f"info:{exp_dir}"
+    if cache is not None:
+        cached_response = cache.get(cache_key)
+        if cached_response:
+            print(f"Cache HIT for info/{exp_dir}")
+            return ExperimentInfoResponse(**cached_response)
+        print(f"Cache MISS for info/{exp_dir}")
+
     try:
         info = _get_exp_dir_info(exp_dir)
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
-    return ExperimentInfoResponse(
-        exp_dir=info['exp_dir'],
-        checkpoint_path=info['checkpoint_path'],
-        has_checkpoint=info['has_checkpoint'],
-        has_program=info['has_program'],
-        has_results=info['has_results'],
-        has_git_log=info['has_git_log'],
-        has_global_results=info['has_global_results'],
-        has_metadata=info['has_metadata'],
-        git_log=info.get('git_log'),
-        results_data=info.get('results_data'),
-        metadata=info.get('metadata')
-    )
+    response_data = {
+        'exp_dir': info['exp_dir'],
+        'checkpoint_path': info['checkpoint_path'],
+        'has_checkpoint': info['has_checkpoint'],
+        'has_program': info['has_program'],
+        'has_results': info['has_results'],
+        'has_git_log': info['has_git_log'],
+        'has_global_results': info['has_global_results'],
+        'has_metadata': info['has_metadata'],
+        'git_log': [g.model_dump() if hasattr(g, 'model_dump') else g for g in info.get('git_log', [])],
+        'results_data': info.get('results_data'),
+        'metadata': info.get('metadata')
+    }
+
+    # Cache the response
+    if cache is not None:
+        cache.set(cache_key, response_data)
+        print(f"Cached info/{exp_dir} response")
+
+    return ExperimentInfoResponse(**response_data)
 
 
 @app.get("/info", response_model=ExperimentInfoResponse)
-async def get_latest_exp_info():
+async def get_latest_exp_info(_: bool = Depends(verify_api_key)):
     """Get information about the latest experiment directory with a checkpoint.
 
     This is a convenience endpoint that combines /latest and /info/{exp_dir}.

@@ -18,3 +18,20 @@ AGENTS.md
 
 # Experimental code/artifacts
 dev/
+
+# Frontend (Next.js)
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend-old/
+
+# Environment files (may contain secrets)
+.env
+.env.*
+!.env.example
+
+# Checkpoints and cache (large files)
+checkpoints/
+*.pt
+*.pth
+cache/

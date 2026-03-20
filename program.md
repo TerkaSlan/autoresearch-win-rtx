@@ -12,6 +12,7 @@ To set up a new experiment, work with the user to:
    - `README.md` — repository context.
    - `prepare.py` — fixed constants, data prep, tokenizer, dataloader, evaluation. Do not modify.
    - `train.py` — the file you modify. Model architecture, optimizer, training loop.
+   - `program.md` - this is for the human to modify.
 4. **Verify data exists**: Check that `~/.cache/autoresearch/` contains data shards and a tokenizer. If not, tell the human to run `uv run prepare.py`.
 5. **Initialize results.tsv**: Create `results.tsv` with just the header row. The baseline will be recorded after the first run.
 6. **Confirm and go**: Confirm setup looks good.
@@ -89,54 +90,62 @@ d4e5f6g	0.000000	0.0	crash	double model width (OOM)
 
 ## Experiment Persistence
 
-The training script requires an explicitly created experiment directory to save checkpoints. Each successful experiment should have its own directory in the `checkpoints/` folder.
+The training script saves checkpoints to the current working directory only when val_bpb improves. Each successful experiment should have its own directory in the `checkpoints/` folder.
+
+### Running Training
+
+Run the training script without any experiment directory argument:
+```bash
+uv run train.py > run.log 2>&1
+```
+
+train.py will save `checkpoint.pt` in the current directory **only if val_bpb improves**. You can check if a checkpoint was saved by grepping for `CHECKPOINT_SAVED:` in the log.
 
 ### Creating Experiment Directories
 
-**Before running each experiment**, create a new experiment directory with a timestamp and commit SHA:
-```bash
-timestamp=$(date +%Y%m%d_%H%M%S)
-commit_short=$(git rev-parse --short HEAD)
-exp_dir="checkpoints/${timestamp}-${commit_short}"
-mkdir -p "$exp_dir"
-echo "Experiment directory: $exp_dir"
-```
+**Only after val_bpb has improved**, create an experiment directory and move the checkpoint:
 
-### Running Training with --exp-dir
-
-Pass the experiment directory to the training script:
-```bash
-uv run train.py --exp-dir "$exp_dir" > run.log 2>&1
-```
-
-The checkpoint will be saved to `$exp_dir/checkpoint.pt` only if val_bpb improves.
+1. Check if val_bpb improved: `grep "CHECKPOINT_SAVED:" run.log`
+2. If checkpoint was saved, create the experiment directory:
+   ```bash
+   timestamp=$(date +%Y%m%d_%H%M%S)
+   commit_short=$(git rev-parse --short HEAD)
+   exp_dir="checkpoints/${timestamp}-${commit_short}"
+   mkdir -p "$exp_dir"
+   ```
+3. Move the checkpoint: `mv checkpoint.pt "$exp_dir/"`
 
 ### Required Experiment Files
 
-For each successful experiment (where val_bpb decreased), ensure these files exist in the experiment directory:
+For each experiment with `status: keep` in results.tsv, ensure these files exist in the experiment directory:
 
-1. **checkpoint.pt** - Automatically saved by train.py when val_bpb improves
+1. **checkpoint.pt** - Moved from current directory after train.py saves it
 2. **git_log.txt** - Git commit info for provenance
-3. **results.tsv.global** - Copy of the global results.tsv file
+3. **results.tsv.global** - Copy of the global results.tsv file (after writing the experiment row)
 
 ### Saving Experiment Artifacts (AI Agent Responsibility)
 
-After each run that produces a checkpoint (val_bpb improved), you need to create the supporting files:
+After each run where **val_bpb improved** (checkpoint.pt exists), create the supporting files:
 
-1. **Create git_log.txt** in the experiment directory:
+1. Record results in results.tsv with `status: keep`
+2. Create experiment directory and move checkpoint:
    ```bash
-   git log -1 > "$exp_dir/git_log.txt"
+   timestamp=$(date +%Y%m%d_%H%M%S)
+   commit_short=$(git rev-parse --short HEAD)
+   exp_dir="checkpoints/${timestamp}-${commit_short}"
+   mkdir -p "$exp_dir"
+   mv checkpoint.pt "$exp_dir/"
    ```
+3. Create git_log.txt: `git log -1 > "$exp_dir/git_log.txt"`
+4. Copy results.tsv: `cp results.tsv "$exp_dir/results.tsv.global"`
+5. Verify all files: `ls "$exp_dir/checkpoint.pt" "$exp_dir/git_log.txt" "$exp_dir/results.tsv.global"`
 
-2. **Copy global results.tsv** to the experiment directory:
-   ```bash
-   cp results.tsv "$exp_dir/results.tsv.global"
-   ```
+### Experiment Directory Management
 
-3. Verify all files exist:
-   ```bash
-   ls "$exp_dir/checkpoint.pt" "$exp_dir/git_log.txt" "$exp_dir/results.tsv.global"
-   ```
+- **Do NOT create an experiment directory before running the experiment**
+- The `checkpoints/` directory should contain subdirectories **only for experiments with `status: keep`** in results.tsv
+- If val_bpb did not improve, do NOT create any experiment directory
+- If checkpoint.pt exists in current directory after a discarded run, delete it: `rm checkpoint.pt`
 
 ### Directory Permissions
 
@@ -156,19 +165,21 @@ LOOP FOREVER:
 1. Look at the git state: the current branch/commit we're on
 2. Tune `train.py` with an experimental idea by directly hacking the code.
 3. git commit - Use the following attribution for Co-Authored-By: "GLM-4.7 <k8s@cerit-sc.cz>" (this is the model running autoresearch on e-infra CZ services)
-4. Create experiment directory: `timestamp=$(date +%Y%m%d_%H%M%S); commit_short=$(git rev-parse --short HEAD); exp_dir="checkpoints/${timestamp}-${commit_short}"; mkdir -p "$exp_dir"`
-5. Run the experiment: `uv run train.py --exp-dir "$exp_dir" > run.log 2>&1` (redirect everything — do NOT use tee or let output flood your context)
-6. Read out the results: `grep "^val_bpb:\|^peak_vram_mb:" run.log`
-7. If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python stack trace and attempt a fix. If you can't get things to work after more than a few attempts, give up.
-8. Record the results in the tsv
-9. If val_bpb improved (lower) and checkpoint.pt exists in $exp_dir:
+4. Run the experiment: `uv run train.py > run.log 2>&1` (redirect everything — do NOT use tee or let output flood your context)
+5. Read out the results: `grep "^val_bpb:\|^peak_vram_mb:\|CHECKPOINT_SAVED:" run.log`
+6. If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python stack trace and attempt a fix. If you can't get things to work after more than a few attempts, give up.
+7. Record the results in the tsv with appropriate status (`keep`, `discard`, or `crash`)
+8. **Only if val_bpb improved (lower) AND status is `keep` AND checkpoint was saved**:
+   - Create experiment directory: `timestamp=$(date +%Y%m%d_%H%M%S); commit_short=$(git rev-parse --short HEAD); exp_dir="checkpoints/${timestamp}-${commit_short}"; mkdir -p "$exp_dir"`
+   - Move checkpoint: `mv checkpoint.pt "$exp_dir/"`
    - Save git_log.txt: `git log -1 > "$exp_dir/git_log.txt"`
    - Copy results.tsv: `cp results.tsv "$exp_dir/results.tsv.global"`
    - Verify files: `ls "$exp_dir/checkpoint.pt" "$exp_dir/git_log.txt" "$exp_dir/results.tsv.global"`
    - You "advance" the branch, keeping the git commit
-10. If val_bpb is equal or worse (or checkpoint not saved):
-    - You git reset back to where you started
-    - Optionally remove empty experiment directory: `rm -rf "$exp_dir"`
+9. If val_bpb did not improve (or status is `discard` or `crash`):
+   - Do NOT create any experiment directory
+   - If checkpoint.pt exists, delete it: `rm -f checkpoint.pt`
+   - You git reset back to where you started
 
 The idea is that you are a completely autonomous researcher trying things out. If they work, keep. If they don't, discard. And you're advancing the branch so that you can iterate. If you feel like you're getting stuck in some way, you can rewind but you should probably do this very very sparingly (if ever).
 
