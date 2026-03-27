@@ -319,7 +319,26 @@ def sample_top_k(logits, temperature=1.0, top_k=None, top_p=None):
 
 @torch.no_grad()
 def generate(model, idx, max_new_tokens, temperature=1.0, top_k=None, top_p=None, eos_token_id=None, show_progress=False):
-    """Generate text tokens - autoregressive decoding."""
+    """Generate text tokens - autoregressive decoding.
+
+    Args:
+        model: The GPT model
+        idx: Starting token tensor (B, T)
+        max_new_tokens: Maximum tokens to generate
+        temperature: Sampling temperature (lower = more focused)
+        top_k: Top-k sampling (limit to top K tokens)
+        top_p: Nucleus sampling (cumulative probability threshold)
+        eos_token_id: Optional EOS token ID for early stopping
+        show_progress: Whether to print progress dots
+
+    Returns:
+        Generated token tensor (B, T + new_tokens)
+    """
+    # Default to BOS token as EOS (token 8188 = <|reserved_0|>)
+    # This prevents the model from starting a new sequence mid-generation
+    if eos_token_id is None:
+        eos_token_id = 8188  # <|reserved_0|> is our BOS/EOS token
+
     model.eval()
     for _ in range(max_new_tokens):
         idx_cond = idx if idx.size(1) <= model.config.sequence_len else idx[:, -model.config.sequence_len:]
@@ -332,7 +351,13 @@ def generate(model, idx, max_new_tokens, temperature=1.0, top_k=None, top_p=None
 
         idx = torch.cat([idx, next_token], dim=1)
 
-        if eos_token_id is not None and (next_token == eos_token_id).all():
+        # Stop if we hit EOS token or BOS token (indicating new sequence start)
+        if (next_token == eos_token_id).all():
+            break
+
+        # Stop if we output BOS token (it means the model started a new sequence)
+        # This prevents the repetitive pattern where model outputs <|reserved_0|> mid-text
+        if (next_token == 8188).all():  # <|reserved_0|>
             break
 
         if show_progress:

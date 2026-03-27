@@ -10,7 +10,7 @@ const API_KEY = process.env.AUTORESEARCH_API_KEY;
 // For production, use Redis or similar
 const rateLimitStore = new Map<string, { count: number; resetTime: number }>();
 const RATE_LIMIT_WINDOW_MS = 60 * 1000; // 1 minute
-const RATE_LIMIT_MAX_REQUESTS = 100; // 100 requests per minute per IP
+const RATE_LIMIT_MAX_REQUESTS = 500; // 500 requests per minute per IP (~45 page loads)
 
 interface RateLimitResult {
   allowed: boolean;
@@ -68,7 +68,7 @@ export function getBackendHeaders(): Record<string, string> {
   };
 
   if (API_KEY) {
-    headers['x-api-key'] = API_KEY;
+    headers['Authorization'] = `Bearer ${API_KEY}`;
   }
 
   return headers;

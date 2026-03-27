@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import type { CSSProperties } from "react";
 
@@ -14,7 +14,40 @@ interface Metrics {
   objectTracking: number;
   numTokens: number;
   numSentences: number;
+  lengthScore: number;
+  tooShort: number;
   constraintDetails: boolean[];
+}
+
+// Stop at EOS/reserved token - detect <|reserved|> or <|reserved_0|> and truncate
+function stripAfterReserved(text: string): string {
+  // Check for both token variants
+  const eos1 = "<|reserved|>";
+  const eos2 = "<|reserved_0|>";
+
+  const idx1 = text.indexOf(eos1);
+  const idx2 = text.indexOf(eos2);
+
+  // Find the earliest occurrence
+  let minIdx = -1;
+  if (idx1 !== -1 && idx2 !== -1) {
+    minIdx = Math.min(idx1, idx2);
+  } else if (idx1 !== -1) {
+    minIdx = idx1;
+  } else if (idx2 !== -1) {
+    minIdx = idx2;
+  }
+
+  return minIdx === -1 ? text : text.slice(0, minIdx);
+}
+
+// Minimum length metric
+function lengthScore(tokens: string[], minExpected = 50): number {
+  return Math.min(1, tokens.length / minExpected);
+}
+
+function tooShort(tokens: string[], threshold = 30): number {
+  return tokens.length < threshold ? 1 : 0;
 }
 
 function tokenize(text: string): string[] {
@@ -97,6 +130,8 @@ function evaluate(text: string): Metrics {
     objectTracking: objectTracking(tokens),
     numTokens: tokens.length,
     numSentences: sentences.length,
+    lengthScore: lengthScore(tokens),
+    tooShort: tooShort(tokens),
     constraintDetails: constraintScore(text)[1]
   };
 }
@@ -140,39 +175,74 @@ function computeComparison(current: Metrics, prev: Metrics): Record<string, { va
   return result;
 }
 
-// Format comparison display with color and direction indicator
-// isLowerBetter: if true, lower values are better (e.g., rep3gram, sheStartRatio)
-// isHigherBetter: if true, higher values are better (e.g., uniqueRatio, constraintScore)
-function formatComparison(current: number, previous: number, isLowerBetter: boolean): React.ReactNode {
-  const prevNum = Number(previous);
-  const currNum = Number(current);
-  const diff = currNum - prevNum;
-  const diffPercent = prevNum !== 0 ? (diff / Math.abs(prevNum)) * 100 : (currNum > 0 ? 100 : 0);
+// Absolute thresholds for metric evaluation
+// Returns 'good', 'bad', or 'neutral' based on absolute value thresholds
+function evaluateMetricThreshold(metric: string, value: number): 'good' | 'bad' | 'neutral' {
+  // Lower is better (lower values = better)
+  const lowerIsBetterMetrics = ['rep3gram', 'sheStartRatio', 'tooShort'];
+  // Higher is better (higher values = better)
+  const higherIsBetterMetrics = ['uniqueRatio', 'sheStartRatio', 'constraintScore', 'objectTracking', 'lengthScore', 'hasEnding', 'numTokens', 'numSentences'];
 
-  // Determine if this is improvement based on whether lower or higher is better
-  const isImprovement = isLowerBetter ? diff < 0 : diff > 0;
-  const isNeutral = diff === 0;
+  // Thresholds: [good_threshold, bad_threshold]
+  // For lowerIsBetter: good if <= good_threshold, bad if >= bad_threshold
+  // For higherIsBetter: good if >= good_threshold, bad if <= bad_threshold
 
-  const sign = diffPercent > 0 ? "+" : "";
-  const color = isNeutral ? "gray" : (isImprovement ? "green" : "red");
-  const statusText = isNeutral ? "no change" : (isImprovement ? "improvement" : "deterioration");
-  const direction = isNeutral ? "●" : (isImprovement ? "▲" : "▼");
-
-  // Special handling for hasEnding (binary 0/1)
-  if ((previous === 0 || previous === 1) && (current === 0 || current === 1)) {
-    if (previous === 0 && current === 1) {
-      return <span style={{ fontSize: "10px", color: "green" }}>(+100% improvement ▲)</span>;
-    }
-    if (previous === 1 && current === 0) {
-      return <span style={{ fontSize: "10px", color: "red" }}>(-100% deterioration ▼)</span>;
-    }
-    // Same value - no change
-    return <span style={{ fontSize: "10px", color: "gray" }}>(0% no change ●)</span>;
+  switch (metric) {
+    case 'rep3gram': // Lower repetition is better
+      // < 0.1 = good, > 0.3 = bad
+      return value <= 0.1 ? 'good' : value >= 0.3 ? 'bad' : 'neutral';
+    case 'uniqueRatio': // Higher vocabulary diversity is better
+      // > 0.5 = good, < 0.3 = bad
+      return value >= 0.5 ? 'good' : value <= 0.3 ? 'bad' : 'neutral';
+    case 'sheStartRatio': // Lower "She" starts is better (more variety)
+      // < 0.4 = good, > 0.7 = bad
+      return value <= 0.4 ? 'good' : value >= 0.7 ? 'bad' : 'neutral';
+    case 'constraintScore': // Higher constraint satisfaction is better
+      // 1.0 = good, 0.0-0.5 = bad, 0.5-1.0 = neutral
+      return value === 1.0 ? 'good' : value <= 0.5 ? 'bad' : 'neutral';
+    case 'hasEnding': // Binary: has a proper ending is better
+      // 1 = good, 0 = bad
+      return value >= 1 ? 'good' : 'bad';
+    case 'objectTracking': // Better tracking is better
+      // > 0.6 = good, < 0.3 = bad
+      return value >= 0.6 ? 'good' : value <= 0.3 ? 'bad' : 'neutral';
+    case 'lengthScore': // Longer output is better (up to 1.0)
+      // >= 0.8 = good, < 0.5 = bad
+      return value >= 0.8 ? 'good' : value < 0.5 ? 'bad' : 'neutral';
+    case 'tooShort': // Short output is bad
+      // 0 = good, 1 = bad
+      return value === 0 ? 'good' : 'bad';
+    case 'numTokens': // More tokens is generally better
+      // >= 50 = good, < 30 = bad
+      return value >= 50 ? 'good' : value < 30 ? 'bad' : 'neutral';
+    case 'numSentences': // More sentences is generally better
+      // >= 3 = good, < 1 = bad
+      return value >= 3 ? 'good' : value < 1 ? 'bad' : 'neutral';
+    default:
+      return 'neutral';
   }
+}
+
+// Color for metric value based on absolute thresholds
+function getMetricColor(metric: string, value: number): string {
+  const evaluation = evaluateMetricThreshold(metric, value);
+  switch (evaluation) {
+    case 'good': return 'green';
+    case 'bad': return 'red';
+    default: return '#333';
+  }
+}
+
+// Format metric value with colored background based on thresholds
+// isLowerBetter: if true, lower values are better
+function formatMetricWithColor(metric: string, value: number, isLowerBetter: boolean): React.ReactNode {
+  const evaluation = evaluateMetricThreshold(metric, value);
+  const color = getMetricColor(metric, value);
+  const formattedValue = typeof value === 'number' ? value.toFixed(4) : value;
 
   return (
-    <span style={{ fontSize: "10px", color }}>
-      ({sign}{diffPercent.toFixed(1)}% {statusText} {direction})
+    <span style={{ color, fontWeight: evaluation !== 'neutral' ? 'bold' : 'normal' }}>
+      {formattedValue}
     </span>
   );
 }
@@ -218,6 +288,54 @@ interface ExperimentDir {
 interface ListResponse {
   experiments: ExperimentDir[];
   count: number;
+}
+
+// Info icon component with tooltip
+function InfoIcon({ text }: { text: string }) {
+  return (
+    <>
+      <span className="info-icon" data-info={text}>i</span>
+      <style jsx>{`
+        .info-icon {
+          position: relative;
+          display: inline-block;
+          width: 14px;
+          height: 14px;
+          border-radius: 50%;
+          background: #666;
+          color: #fff;
+          font-size: 10px;
+          line-height: 14px;
+          text-align: center;
+          cursor: default;
+          font-family: sans-serif;
+          font-style: normal;
+          margin-left: 4px;
+          vertical-align: middle;
+        }
+        .info-icon::after {
+          content: attr(data-info);
+          position: absolute;
+          bottom: 125%;
+          left: 50%;
+          transform: translateX(-50%);
+          background: #333;
+          color: #fff;
+          padding: 6px 8px;
+          border-radius: 6px;
+          font-size: 11px;
+          white-space: nowrap;
+          opacity: 0;
+          pointer-events: none;
+          transition: opacity 0.2s ease;
+          z-index: 10;
+        }
+        .info-icon:hover::after {
+          opacity: 1;
+        }
+      `}</style>
+    </>
+  );
 }
 
 const styles: Record<string, CSSProperties> = {
@@ -438,9 +556,10 @@ interface ExperimentCardProps {
   prevValBpb?: number;
   currentData?: { metrics: Metrics; result: GenerateResponse };
   collapsed?: boolean;
+  onExpand?: (experiment: ExperimentDir) => void;
 }
 
-function ExperimentCard({ experiment, prevMetrics, prevValBpb, currentData, collapsed = false }: ExperimentCardProps) {
+function ExperimentCard({ experiment, prevMetrics, prevValBpb, currentData, collapsed = false, onExpand }: ExperimentCardProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expInfo, setExpInfo] = useState<ExperimentInfo | null>(null);
@@ -452,6 +571,10 @@ function ExperimentCard({ experiment, prevMetrics, prevValBpb, currentData, coll
   const API_BASE_URL = "/api/proxy";
 
   useEffect(() => {
+    if (!isExpanded || expInfo) {
+      return;
+    }
+
     const fetchData = async () => {
       try {
         // Get experiment info
@@ -469,14 +592,12 @@ function ExperimentCard({ experiment, prevMetrics, prevValBpb, currentData, coll
     };
 
     fetchData();
-  }, [experiment]);
+  }, [experiment, isExpanded, expInfo]);
 
-  // Return null if there's an error to hide the card
-  if (error) {
-    return null;
-  }
+  // Don't hide card on error - show error state within the card instead
 
-  const cleanGeneratedText = currentData?.result?.generated_text?.replace("<|reserved_0|>", "") ?? "";
+  // Display text: backend returns continuation only, just strip reserved tokens
+  const cleanGeneratedText = stripAfterReserved(currentData?.result?.generated_text ?? "").trim();
 
   // Parse timestamp from exp_dir (format: YYYYMMDD_HHMMSS-<commit_short>)
   const parseTimestamp = (expDir: string): { full: string; date: string; time: string } => {
@@ -528,24 +649,34 @@ function ExperimentCard({ experiment, prevMetrics, prevValBpb, currentData, coll
 
   const fixedResults = expInfo?.results_data ? fixResultsTsv(expInfo.results_data.header, expInfo.results_data.rows) : { header: [], rows: [] };
 
-  // Extract val_bpb from results
+  // Reverse rows so most recent appears first
+  const reversedResults = { header: fixedResults.header, rows: [...fixedResults.rows].reverse() };
+
+  // Extract val_bpb from results (first row after reverse = most recent)
   const getValBpb = (): number | null => {
-    if (!fixedResults.header.length || !fixedResults.rows.length) return null;
-    const valBpbIdx = fixedResults.header.indexOf('val_bpb');
+    if (!reversedResults.header.length || !reversedResults.rows.length) return null;
+    const valBpbIdx = reversedResults.header.indexOf('val_bpb');
     if (valBpbIdx === -1) return null;
-    const lastRow = fixedResults.rows[fixedResults.rows.length - 1];
-    const val = lastRow?.[valBpbIdx];
+    const firstRow = reversedResults.rows[0];
+    const val = firstRow?.[valBpbIdx];
     return val ? parseFloat(val) : null;
   };
   const valBpb = getValBpb();
 
-  const timestamp = expInfo ? parseTimestamp(expInfo.exp_dir) : { full: "", date: "", time: "" };
+  // Use experiment.name for timestamp if expInfo not loaded yet
+  const timestamp = expInfo ? parseTimestamp(expInfo.exp_dir) : parseTimestamp(experiment.name);
   const latestCommit = expInfo?.git_log?.[0];
 
   // Collapsed view - just header with expand button
   if (collapsed && !isExpanded) {
     return (
-      <div style={{...styles.container, cursor: "pointer"}} onClick={() => setIsExpanded(true)}>
+      <div
+        style={{...styles.container, cursor: "pointer"}}
+        onClick={() => {
+          setIsExpanded(true);
+          onExpand?.(experiment);
+        }}
+      >
         <div style={{display: "flex", justifyContent: "space-between", alignItems: "center"}}>
           <div style={{display: "flex", alignItems: "center", gap: "8px"}}>
             <span style={{color: "#888", fontSize: "12px"}}>▶</span>
@@ -560,7 +691,6 @@ function ExperimentCard({ experiment, prevMetrics, prevValBpb, currentData, coll
           {valBpb !== null && (
             <div style={{fontSize: "12px", color: "#666"}}>
               val_bpb: {valBpb.toFixed(3)}
-              {prevValBpb !== undefined && prevValBpb !== null && formatComparison(valBpb, prevValBpb, true)}
             </div>
           )}
         </div>
@@ -591,8 +721,7 @@ function ExperimentCard({ experiment, prevMetrics, prevValBpb, currentData, coll
         </div>
         {valBpb !== null && (
           <div style={{fontSize: "12px", color: "#666", textAlign: "right"}}>
-            <span title="Validation bits per byte - lower is better" style={{cursor: "help"}}>val_bpb</span>: {valBpb.toFixed(3)}
-            {prevValBpb !== undefined && prevValBpb !== null && formatComparison(valBpb, prevValBpb, true)}
+            <span>val_bpb</span><InfoIcon text="Validation bits per byte - lower is better" />: {valBpb.toFixed(3)}
           </div>
         )}
       </div>
@@ -603,7 +732,16 @@ function ExperimentCard({ experiment, prevMetrics, prevValBpb, currentData, coll
         </div>
       )}
 
-      {!loading && currentData && (
+      {!loading && error && (
+        <div style={{...styles.box, ...styles.error}}>
+          <p><strong>Error:</strong> {error}</p>
+          <button onClick={() => { setError(null); setLoading(true); }} style={{fontSize: "11px", marginTop: "4px"}}>
+            Retry
+          </button>
+        </div>
+      )}
+
+      {!loading && !error && currentData && (
         <>
           <div style={styles.result}>
             <div style={styles.row}>
@@ -657,13 +795,13 @@ function ExperimentCard({ experiment, prevMetrics, prevValBpb, currentData, coll
                       <table style={styles.table}>
                         <thead>
                           <tr>
-                            {fixedResults.header.map((h, idx) => (
+                            {reversedResults.header.map((h, idx) => (
                               <th key={idx} style={styles.th}>{h}</th>
                             ))}
                           </tr>
                         </thead>
                         <tbody>
-                          {fixedResults.rows.map((row, rowIdx) => (
+                          {reversedResults.rows.map((row, rowIdx) => (
                             <tr key={rowIdx}>
                               {row.map((cell, cellIdx) => (
                                 <td key={cellIdx} style={styles.td}>{cell}</td>
@@ -688,34 +826,16 @@ function ExperimentCard({ experiment, prevMetrics, prevValBpb, currentData, coll
                   </button>
                   {showMetrics && (
                     <div style={styles.dropdownContent}>
-                      {prevMetrics ? (
-                        <>
-                          <div style={styles.row}><strong>rep3gram</strong> <span title="Measures text repetition by counting repeated 3-word sequences. Lower values indicate less repetitive, more natural text." style={{cursor: "help", color: "#888", fontSize: "11px", marginLeft: "2px"}}>ⓘ</span>: {currentData.metrics.rep3gram.toFixed(4)} {formatComparison(currentData.metrics.rep3gram, prevMetrics.rep3gram, true)}</div>
-                          <div style={styles.row}><strong>uniqueRatio</strong> <span title="Ratio of unique words to total words. Values between 0.4-0.7 indicate healthy vocabulary diversity without being too repetitive or too random." style={{cursor: "help", color: "#888", fontSize: "11px", marginLeft: "2px"}}>ⓘ</span>: {currentData.metrics.uniqueRatio.toFixed(4)} {formatComparison(currentData.metrics.uniqueRatio, prevMetrics.uniqueRatio, false)}</div>
-                          <div style={styles.row}><strong>sheStartRatio</strong> <span title="Fraction of sentences starting with 'She'. Lower values indicate more varied sentence structure and better writing quality." style={{cursor: "help", color: "#888", fontSize: "11px", marginLeft: "2px"}}>ⓘ</span>: {currentData.metrics.sheStartRatio.toFixed(4)} {formatComparison(currentData.metrics.sheStartRatio, prevMetrics.sheStartRatio, true)}</div>
-                          <div style={styles.row}><strong>constraintScore</strong> <span title="How many prompt constraints were satisfied: red key, blue door, tried/first/second/third, learned/realized. 1.0 means all 4 constraints met." style={{cursor: "help", color: "#888", fontSize: "11px", marginLeft: "2px"}}>ⓘ</span>: {currentData.metrics.constraintScore.toFixed(4)} {formatComparison(currentData.metrics.constraintScore, prevMetrics.constraintScore, false)}</div>
-                          <div style={styles.row}><strong>objectTracking</strong> <span title="Measures balance between 'key' and 'door' mentions. Values closer to 1 indicate the model properly tracks and references both objects equally." style={{cursor: "help", color: "#888", fontSize: "11px", marginLeft: "2px"}}>ⓘ</span>: {currentData.metrics.objectTracking.toFixed(4)} {formatComparison(currentData.metrics.objectTracking, prevMetrics.objectTracking, false)}</div>
-                          <div style={styles.row}><strong>numSentences</strong> <span title="Total number of sentences generated. Helps track output length consistency across experiments." style={{cursor: "help", color: "#888", fontSize: "11px", marginLeft: "2px"}}>ⓘ</span>: {currentData.metrics.numSentences} {formatComparison(currentData.metrics.numSentences, prevMetrics.numSentences, false)}</div>
-                        </>
-                      ) : (
-                        <>
-                          <div style={styles.row}><strong>rep3gram</strong> <span title="Measures text repetition by counting repeated 3-word sequences. Lower values indicate less repetitive, more natural text." style={{cursor: "help", color: "#888", fontSize: "11px", marginLeft: "2px"}}>ⓘ</span>: {currentData.metrics.rep3gram.toFixed(4)}</div>
-                          <div style={styles.row}><strong>uniqueRatio</strong> <span title="Ratio of unique words to total words. Values between 0.4-0.7 indicate healthy vocabulary diversity without being too repetitive or too random." style={{cursor: "help", color: "#888", fontSize: "11px", marginLeft: "2px"}}>ⓘ</span>: {currentData.metrics.uniqueRatio.toFixed(4)}</div>
-                          <div style={styles.row}><strong>sheStartRatio</strong> <span title="Fraction of sentences starting with 'She'. Lower values indicate more varied sentence structure and better writing quality." style={{cursor: "help", color: "#888", fontSize: "11px", marginLeft: "2px"}}>ⓘ</span>: {currentData.metrics.sheStartRatio.toFixed(4)}</div>
-                          <div style={styles.row}><strong>constraintScore</strong> <span title="How many prompt constraints were satisfied: red key, blue door, tried/first/second/third, learned/realized. 1.0 means all 4 constraints met." style={{cursor: "help", color: "#888", fontSize: "11px", marginLeft: "2px"}}>ⓘ</span>: {currentData.metrics.constraintScore.toFixed(4)}</div>
-                          <div style={styles.row}><strong>objectTracking</strong> <span title="Measures balance between 'key' and 'door' mentions. Values closer to 1 indicate the model properly tracks and references both objects equally." style={{cursor: "help", color: "#888", fontSize: "11px", marginLeft: "2px"}}>ⓘ</span>: {currentData.metrics.objectTracking.toFixed(4)}</div>
-                          <div style={styles.row}><strong>numSentences</strong> <span title="Total number of sentences generated. Helps track output length consistency across experiments." style={{cursor: "help", color: "#888", fontSize: "11px", marginLeft: "2px"}}>ⓘ</span>: {currentData.metrics.numSentences}</div>
-                        </>
-                      )}
-                      <div style={{marginTop: "6px", paddingTop: "6px", borderTop: "1px solid #eee"}}>
-                        <strong>constraintDetails:</strong>
-                        <div style={{fontSize: "10px", color: "#666", marginTop: "4px"}}>
-                          <span style={{color: currentData.metrics.constraintDetails[0] ? "green" : "gray"}}>red key: {currentData.metrics.constraintDetails[0] ? "✓" : "✗"}</span> |
-                          <span style={{color: currentData.metrics.constraintDetails[1] ? "green" : "gray"}}>blue door: {currentData.metrics.constraintDetails[1] ? "✓" : "✗"}</span> |
-                          <span style={{color: currentData.metrics.constraintDetails[2] ? "green" : "gray"}}>tried/first/second/third: {currentData.metrics.constraintDetails[2] ? "✓" : "✗"}</span> |
-                          <span style={{color: currentData.metrics.constraintDetails[3] ? "green" : "gray"}}>learned/realized: {currentData.metrics.constraintDetails[3] ? "✓" : "✗"}</span>
-                        </div>
-                      </div>
+                      <>
+                        <div style={styles.row}><strong>rep3gram</strong><InfoIcon text="Measures text repetition by counting repeated 3-word sequences. Lower values indicate less repetitive, more natural text." />: {formatMetricWithColor('rep3gram', currentData.metrics.rep3gram, true)}</div>
+                        <div style={styles.row}><strong>uniqueRatio</strong><InfoIcon text="Ratio of unique words to total words. Values between 0.4-0.7 indicate healthy vocabulary diversity without being too repetitive or too random." />: {formatMetricWithColor('uniqueRatio', currentData.metrics.uniqueRatio, false)}</div>
+                        <div style={styles.row}><strong>sheStartRatio</strong><InfoIcon text="Fraction of sentences starting with 'She'. Lower values indicate more varied sentence structure and better writing quality." />: {formatMetricWithColor('sheStartRatio', currentData.metrics.sheStartRatio, true)}</div>
+                        <div style={styles.row}><strong>constraintScore</strong><InfoIcon text="How many prompt constraints were satisfied: red key, blue door, tried/first/second/third, learned/realized. 1.0 means all 4 constraints met." />: {formatMetricWithColor('constraintScore', currentData.metrics.constraintScore, false)}</div>
+                        <div style={styles.row}><strong>objectTracking</strong><InfoIcon text="Measures balance between 'key' and 'door' mentions. Values closer to 1 indicate the model properly tracks and references both objects equally." />: {formatMetricWithColor('objectTracking', currentData.metrics.objectTracking, false)}</div>
+                        <div style={styles.row}><strong>lengthScore</strong><InfoIcon text="Ratio of generated tokens to minimum expected (50). 1.0 means at least 50 tokens generated." />: {formatMetricWithColor('lengthScore', currentData.metrics.lengthScore, false)}</div>
+                        <div style={styles.row}><strong>tooShort</strong><InfoIcon text="Flag indicating if output is below threshold (30 tokens). 1 means too short, 0 means adequate length." />: {formatMetricWithColor('tooShort', currentData.metrics.tooShort, true)}</div>
+                        <div style={styles.row}><strong>numSentences</strong><InfoIcon text="Total number of sentences generated. Helps track output length consistency across experiments." />: {formatMetricWithColor('numSentences', currentData.metrics.numSentences, false)}</div>
+                      </>
                     </div>
                   )}
                 </div>
@@ -734,6 +854,53 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [experimentData, setExperimentData] = useState<{[key: string]: { metrics: Metrics; result: GenerateResponse }}>({});
   const [valBpbData, setValBpbData] = useState<{[key: string]: number}>({});
+  const loadingExperimentsRef = useRef<Set<string>>(new Set());
+
+  const API_BASE_URL = "/api/proxy";
+  const DEFAULT_PROMPT = "Once upon a time, there was a girl named Lily. She found a red key and a locked blue door. The key did not fit. She tried to open the door.";
+
+  const fetchExperimentGeneration = async (exp: ExperimentDir): Promise<void> => {
+    if (experimentData[exp.name] || loadingExperimentsRef.current.has(exp.name)) {
+      return;
+    }
+
+    loadingExperimentsRef.current.add(exp.name);
+    try {
+      const genResponse = await fetch(`${API_BASE_URL}/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt: DEFAULT_PROMPT,
+          max_tokens: 100,
+          temperature: 0.3,
+          top_k: 25,
+          top_p: 0.85,
+          checkpoint: exp.checkpoint_path,
+        }),
+      });
+
+      if (!genResponse.ok) {
+        throw new Error(`Generate failed for ${exp.name}: ${genResponse.status}`);
+      }
+
+      const genData: GenerateResponse = await genResponse.json();
+
+      // Backend now returns only the continuation (prompt-conditioned generation)
+      // Just need to strip reserved tokens and evaluate
+      const generatedText = genData.generated_text ?? "";
+      const cleaned = stripAfterReserved(generatedText);
+      const metrics = evaluate(cleaned.trim());
+
+      setExperimentData(prev => ({
+        ...prev,
+        [exp.name]: { metrics, result: genData },
+      }));
+    } catch (err) {
+      console.error(`Failed to fetch generate data for ${exp.name}:`, err);
+    } finally {
+      loadingExperimentsRef.current.delete(exp.name);
+    }
+  };
 
   useEffect(() => {
     const fetchExperiments = async () => {
@@ -749,31 +916,14 @@ export default function Home() {
         setExperiments(filteredExperiments);
         setLoading(false);
 
-        // Then fetch metrics data in the background
-        const API_BASE_URL = "/api/proxy";
-        const promises = filteredExperiments.map(async (exp) => {
+        // Preload metrics data only for the first 5 visible cards
+        const firstVisibleExperiments = filteredExperiments.slice(0, 5);
+        const promises = firstVisibleExperiments.map(async (exp) => {
           try {
-            // Fetch both generate and info in parallel
-            const [genResponse, infoResponse] = await Promise.all([
-              fetch(`${API_BASE_URL}/generate`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  prompt: "Once upon a time, there was a girl named Lily. She found a red key and a locked blue door.\nShe tried to open it. First she pushed it. Second she pulled it. Third she used the key.\nIn the end, she learned patience.",
-                  max_tokens: 100,
-                  temperature: 0.8,
-                  checkpoint: exp.checkpoint_path,  // Use specific checkpoint for each experiment
-                }),
-              }),
-              fetch(`${API_BASE_URL}/info/${exp.name}`)
-            ]);
+            const infoResponse = await fetch(`${API_BASE_URL}/info/${exp.name}`);
 
-            let genData = null;
+            await fetchExperimentGeneration(exp);
             let valBpb = null;
-
-            if (genResponse.ok) {
-              genData = await genResponse.json();
-            }
 
             if (infoResponse.ok) {
               const infoData = await infoResponse.json();
@@ -787,31 +937,24 @@ export default function Home() {
               }
             }
 
-            if (genData) {
-              const genText = genData.generated_text?.replace("<|reserved_0|>", "") ?? "";
-              const metrics = evaluate(genText);
-              return { exp, metrics, result: genData, valBpb };
-            }
+            return { exp, valBpb };
           } catch (err) {
-            console.error(`Failed to fetch data for ${exp.name}:`, err);
+            console.error(`Failed to preload data for ${exp.name}:`, err);
           }
           return null;
         });
 
         const results = await Promise.all(promises);
-        const newData: {[key: string]: { metrics: Metrics; result: GenerateResponse }} = {};
         const newvalBpbData: {[key: string]: number} = {};
 
         for (const result of results) {
           if (result) {
-            newData[result.exp.name] = { metrics: result.metrics, result: result.result };
             if (result.valBpb !== null && result.valBpb !== undefined) {
               newvalBpbData[result.exp.name] = result.valBpb;
             }
           }
         }
 
-        setExperimentData(newData);
         setValBpbData(newvalBpbData);
       } catch (err) {
         setError(err instanceof Error ? err.message : "Unknown error");
@@ -848,6 +991,7 @@ export default function Home() {
                 prevValBpb={idx < experiments.length - 1 ? valBpbData[experiments[idx + 1].name] : undefined}
                 currentData={experimentData[exp.name]}
                 collapsed={idx >= 5}
+                onExpand={fetchExperimentGeneration}
               />
             ))}
           </>

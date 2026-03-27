@@ -88,6 +88,8 @@ c3d4e5f	1.005000	44.0	discard	switch to GeLU activation
 d4e5f6g	0.000000	0.0	crash	double model width (OOM)
 ```
 
+Make sure to add `checkpoints/` directory into .gitignore.
+
 ## Experiment Persistence
 
 The training script saves checkpoints to the current working directory only when val_bpb improves. Each successful experiment should have its own directory in the `checkpoints/` folder.
