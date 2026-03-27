@@ -221,12 +221,12 @@ class GPT(nn.Module):
         self.register_buffer("cos", cos, persistent=False)
         self.register_buffer("sin", sin, persistent=False)
 
-    def _precompute_rotary_embeddings(self, seq_len, head_dim, base=10000, device=None, dtype=torch.bfloat16):
+    def _precompute_rotary_embeddings(self, seq_len, head_dim, device=None, dtype=torch.bfloat16):
         """Precompute rotary embeddings - EXACT from train.py"""
         if device is None:
             device = self.transformer.wte.weight.device
         channel_range = torch.arange(0, head_dim, 2, dtype=torch.float32, device=device)
-        inv_freq = 1.0 / (base ** (channel_range / head_dim))
+        inv_freq = 1.0 / (self.config.rope_base ** (channel_range / head_dim))
         t = torch.arange(seq_len, dtype=torch.float32, device=device)
         freqs = torch.outer(t, inv_freq)
         cos, sin = freqs.cos(), freqs.sin()
@@ -274,9 +274,8 @@ class GPT(nn.Module):
             x = block(x, ve, cos_sin, window_size)
         x = norm(x)
 
-        softcap = 15
         logits = self.lm_head(x).float()
-        logits = softcap * torch.tanh(logits / softcap)
+        logits = self.config.softcap * torch.tanh(logits / self.config.softcap)
         return logits
 
 
@@ -440,12 +439,14 @@ def _get_default_config_from_checkpoint(state_dict):
     head_dim = n_kv_head_times_head_dim // n_kv_head
     n_head = n_embd // head_dim
 
-    # Check for value embeddings to verify compute_dtype and window_pattern
+    # Check for value embeddings
     has_value_embeds = any(f'value_embeds.{i}' in state_dict for i in range(n_layer))
 
     # Default values
     sequence_len = 2048
     window_pattern = "SSSL"
+    softcap = 15.0
+    rope_base = 10000
 
     # For CPU inference, use float32 for precision (GPU may be bf16/fp16)
     # The weights will be cast appropriately on load
@@ -462,6 +463,8 @@ def _get_default_config_from_checkpoint(state_dict):
         attention_backend="sdpa",
         use_activation_checkpointing=False,
         compute_dtype=compute_dtype,
+        softcap=softcap,
+        rope_base=rope_base,
     )
 
 
@@ -519,13 +522,19 @@ def load_checkpoint(path, device: Optional[str] = None) -> Tuple[GPT, dict, dict
             # Metrics
             metrics_dict = checkpoint.get('metrics', {})
 
-            # Additional metadata
+            # Additional metadata - override config with checkpoint values if available
             if 'timestamp' in checkpoint:
                 metrics_dict['timestamp'] = checkpoint['timestamp']
             if 'val_bpb' in checkpoint:
                 metrics_dict['val_bpb'] = checkpoint['val_bpb']
             if 'step' in checkpoint:
                 metrics_dict['step'] = checkpoint['step']
+            if 'softcap' in checkpoint:
+                config_dict['softcap'] = checkpoint['softcap']
+            if 'rope_base' in checkpoint:
+                config_dict['rope_base'] = checkpoint['rope_base']
+            if 'window_pattern' in checkpoint:
+                config_dict['window_pattern'] = checkpoint['window_pattern']
 
         else:
             # Plain state dict

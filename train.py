@@ -330,6 +330,8 @@ class GPTConfig:
     attention_backend: str = "sdpa"
     use_activation_checkpointing: bool = False
     compute_dtype: torch.dtype = torch.bfloat16
+    softcap: float = 15.0
+    rope_base: int = 10000
 
 
 def norm(x):
@@ -622,9 +624,8 @@ class GPT(nn.Module):
                 x = block(x, ve, cos_sin, window_size)
         x = norm(x)
 
-        softcap = 15
         logits = self.lm_head(x).float()
-        logits = softcap * torch.tanh(logits / softcap)
+        logits = self.config.softcap * torch.tanh(logits / self.config.softcap)
 
         if targets is not None:
             loss = F.cross_entropy(
@@ -1199,16 +1200,32 @@ def _run_training_once(runtime, tokenizer, config, device_batch_size, smoke_test
     }
 
 
-def _save_pre_eval_checkpoint(model, exp_dir=None):
-    """Save checkpoint to exp_dir if provided, otherwise to current directory."""
+def _save_pre_eval_checkpoint(model, config=None, exp_dir=None):
+    """Save checkpoint to exp_dir if provided, otherwise to current directory.
+
+    Args:
+        model: The trained model
+        config: GPTConfig (optional) - saves softcap, rope_base, window_pattern
+        exp_dir: Optional directory to save checkpoint to
+    """
     try:
         state_dict = model._orig_mod.state_dict() if hasattr(model, "_orig_mod") else model.state_dict()
+
+        # Build checkpoint with metadata if config is provided
+        checkpoint = {"model_state_dict": state_dict}
+        if config is not None:
+            checkpoint["config"] = config
+            # Save additional inference-relevant parameters
+            checkpoint["softcap"] = getattr(config, "softcap", 15.0)
+            checkpoint["rope_base"] = getattr(config, "rope_base", 10000)
+            checkpoint["window_pattern"] = getattr(config, "window_pattern", "SSSL")
+
         if exp_dir:
             checkpoint_path = Path(exp_dir) / "checkpoint.pt"
             checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
         else:
             checkpoint_path = Path("checkpoint.pt")
-        torch.save(state_dict, checkpoint_path)
+        torch.save(checkpoint, checkpoint_path)
         print(f"Saved checkpoint to {checkpoint_path}")
         return str(checkpoint_path)
     except Exception as exc:  # pragma: no cover
@@ -1364,7 +1381,7 @@ def main():
     # Save checkpoint only if val_bpb improved (lower than best previous)
     if best_val_bpb is None or val_bpb < best_val_bpb:
         print(f"val_bpb improved! ({best_val_bpb if best_val_bpb is not None else 'N/A'} -> {val_bpb:.6f})")
-        checkpoint_path = _save_pre_eval_checkpoint(model)
+        checkpoint_path = _save_pre_eval_checkpoint(model, config=config)
         print(f"CHECKPOINT_SAVED:{checkpoint_path}")
     else:
         print(f"val_bpb did not improve ({best_val_bpb:.6f} -> {val_bpb:.6f}) - skipping checkpoint save")
