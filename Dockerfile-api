@@ -1,6 +1,6 @@
-# CPU-only Dockerfile for AutoResearch SDPA Inference API
-# tokenizer and checkpoints are provided via volume mounts
-# Designed for K8s deployment with non-root user (UID 1000)
+# CPU-only Dockerfile for AutoResearch SDPA - Experiment Samples API
+# This API serves pre-computed samples from experiment directories
+# No model loading or inference is performed - just reads text files
 
 FROM python:3.10-slim
 
@@ -10,9 +10,6 @@ WORKDIR /app
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    DEVICE=cpu \
-    AUTORESEARCH_CACHE_DIR=/app/cache \
-    AUTORESEARCH_CHECKPOINTS_DIR=/app/checkpoints \
     PATH="/usr/local/bin:${PATH}"
 
 # Install system dependencies
@@ -29,43 +26,26 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
 
 # Create non-root user BEFORE copying files (for proper ownership)
 # User UID 1000 as required by K8s securityContext.runAsUser
-RUN useradd -m -u 1000 inference
+RUN useradd -m -u 1000 api
 
-# Copy prepare.py and inference.py (for tokenizer loading support)
-COPY --chown=inference:inference prepare.py .
-COPY --chown=inference:inference inference.py .
+# Copy ONLY the API server (no inference.py, no prepare.py needed)
+COPY --chown=api:api api_server.py .
 
-# Install ALL Python dependencies (torch, data processing, etc.)
-# numpy is required by PyTorch (torch imports numpy internally)
-# Split install: torch from PyTorch index, others from PyPI
-RUN uv pip install --system \
-    torch==2.4.0+cpu --index-url https://download.pytorch.org/whl/cpu && \
-    uv pip install --system \
-    numpy==1.26.4 \
-    pyarrow==21.0.0 \
-    requests==2.32.0 \
-    rustbpe==0.1.0 \
-    tiktoken==0.11.0
-
-# Copy API server
-COPY --chown=inference:inference api_server.py .
-
-# Install FastAPI dependencies
+# Install FastAPI and uvicorn only (no torch, no inference dependencies)
 RUN uv pip install --system fastapi uvicorn[standard] pydantic==2.10.6 starlette typing-extensions
 
 # Create directories for volume mounts with correct ownership
-RUN mkdir -p /app/cache /app/checkpoints && chown inference:inference /app/cache /app/checkpoints
+RUN mkdir -p /app/checkpoints && chown api:api /app/checkpoints
 
 # Switch to non-root user for running the application
-USER inference
+USER api
 
 # Health check - curl is available in python:3.10-slim base image
-# Runs as inference user
-HEALTHCHECK --interval=60s --timeout=10s --start-period=120s --retries=3 \
+HEALTHCHECK --interval=60s --timeout=10s --start-period=30s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
 # Expose API port
 EXPOSE 8000
 
 # Run the FastAPI server
-CMD ["python", "api_server.py", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python", "api_server.py"]

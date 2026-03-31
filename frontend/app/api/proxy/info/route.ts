@@ -7,6 +7,7 @@ export async function GET(request: NextRequest) {
   if (authError) return authError;
 
   try {
+    // Our API has /info/{exp_name} endpoint
     const response = await fetch(`${BACKEND_URL}/info`, {
       cache: 'no-store',
       headers: getBackendHeaders(),

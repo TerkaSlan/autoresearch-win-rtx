@@ -14,6 +14,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
 
+# Import tokenizer from prepare.py for decoding generated text
+try:
+    from prepare import Tokenizer
+    TOKENIZER_AVAILABLE = True
+except ImportError:
+    TOKENIZER_AVAILABLE = False
+
 # ==========================================
 # MODEL ARCHITECTURE (EXACT COPY FROM train.py)
 # ==========================================
@@ -46,6 +53,8 @@ class GPTConfig:
     attention_backend: str = "sdpa"
     use_activation_checkpointing: bool = False
     compute_dtype: torch.dtype = torch.bfloat16
+    softcap: float = 15.0
+    rope_base: int = 10000
 
 
 # Register GPTConfig in __main__ for pickle compatibility with train.py checkpoints
@@ -566,23 +575,31 @@ def load_checkpoint(path, device: Optional[str] = None) -> Tuple[GPT, dict, dict
 def main():
     parser = argparse.ArgumentParser(description='Generate text from AutoResearch model')
     parser.add_argument('--checkpoint', required=True, help='Path to model checkpoint')
+    parser.add_argument('--prompt', type=str, default='Once upon a time', help='Input prompt text')
     parser.add_argument('--max-tokens', type=int, default=100, help='Tokens to generate')
-    parser.add_argument('--temperature', type=float, default=1.0, help='Sampling temperature')
-    parser.add_argument('--top-k', type=int, default=None, help='Top-k sampling')
-    parser.add_argument('--top-p', type=float, default=None, help='Nucleus sampling')
-    parser.add_argument('--device', default='cpu', help='Device to run on (cpu/cuda)')
+    parser.add_argument('--temperature', type=float, default=0.8, help='Sampling temperature')
+    parser.add_argument('--top-k', type=int, default=40, help='Top-k sampling')
+    parser.add_argument('--top-p', type=float, default=0.9, help='Nucleus sampling')
+    parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu', help='Device to run on (cpu/cuda)')
+    parser.add_argument('--output', type=str, help='Save generated text to file instead of printing')
 
     args = parser.parse_args()
 
     print(f"Loading checkpoint from {args.checkpoint}...")
     model, config, metrics = load_checkpoint(args.checkpoint, device=args.device)
-    print(f"Model loaded with config: {config}")
-    print(f"Metrics: {metrics}")
+    print(f"Model loaded with config: n_layer={config.get('n_layer')}, n_embd={config.get('n_embd')}, n_head={config.get('n_head')}")
 
-    print(f"Generating {args.max_tokens} tokens...")
+    # Encode prompt
+    # Note: For full prompt encoding, you'd need the tokenizer from prepare.py
+    # For now, we use a simple start token (0) and let the model generate
+    # In production, use the tokenizer to encode the prompt properly
+    start_token = [[0]]  # BOS token
+    input_tensor = torch.tensor(start_token, dtype=torch.long).to(args.device)
+
+    print(f"Generating {args.max_tokens} tokens with temperature={args.temperature}...")
     generated = generate(
         model,
-        torch.tensor([[0]], dtype=torch.long).to(args.device),
+        input_tensor,
         max_new_tokens=args.max_tokens,
         temperature=args.temperature,
         top_k=args.top_k,
@@ -590,7 +607,34 @@ def main():
         show_progress=True
     )
 
-    print(f"\nGenerated tokens: {generated.tolist()[0]}")
+    # Decode generated tokens using tokenizer
+    generated_tokens = generated.tolist()[0]
+
+    # Try to decode with tokenizer
+    if TOKENIZER_AVAILABLE:
+        try:
+            # Load tokenizer from checkpoints cache directory
+            import os
+            tokenizer_path = '/workspace/autoresearch-sdpa/checkpoints/cache/datasets/tinystories/tokenizer'
+            tokenizer = Tokenizer.from_directory(tokenizer_dir=tokenizer_path)
+            generated_text = tokenizer.decode(generated_tokens)
+        except Exception as e:
+            generated_text = f"[Decoder error: {e}]\nTokens: {generated_tokens[:50]}..."
+    else:
+        generated_text = f"[Tokenizer not available]\nTokens: {generated_tokens[:50]}..."
+
+    if args.output:
+        # Save to file - include both decoded text and raw tokens
+        with open(args.output, 'w') as f:
+            f.write(f"# Model Output\n")
+            f.write(f"# Checkpoint: {args.checkpoint}\n")
+            f.write(f"# Config: {config}\n")
+            f.write(f"\n{generated_text}\n")
+            f.write(f"\n# Raw Tokens (first 50): {generated_tokens[:50]}\n")
+        print(f"Output saved to {args.output}")
+    else:
+        print(f"\nGenerated text:\n{generated_text}")
+        print(f"\n# Raw tokens (first 50): {generated_tokens[:50]}")
 
 
 if __name__ == '__main__':

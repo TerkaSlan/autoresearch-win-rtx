@@ -9,10 +9,13 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
 
+    // Remove checkpoint parameter - use globally loaded model instead
+    const { checkpoint, ...generateBody } = body;
+
     const response = await fetch(`${BACKEND_URL}/generate`, {
       method: 'POST',
       headers: getBackendHeaders(),
-      body: JSON.stringify(body),
+      body: JSON.stringify(generateBody),
     });
 
     if (!response.ok) {

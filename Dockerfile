@@ -60,6 +60,7 @@ WORKDIR /workspace/autoresearch-sdpa
 # Copy project files (instead of cloning from GitHub)
 COPY --chown=autoresearch:autoresearch train.py .
 COPY --chown=autoresearch:autoresearch prepare.py .
+COPY --chown=autoresearch:autoresearch inference.py .
 COPY --chown=autoresearch:autoresearch pyproject.toml .
 COPY --chown=autoresearch:autoresearch program.md .
 
