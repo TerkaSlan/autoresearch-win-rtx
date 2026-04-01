@@ -4,16 +4,138 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import type { CSSProperties } from "react";
 
+// Metrics computation
+interface Metrics {
+  rep3gram: number;
+  uniqueRatio: number;
+  numTokens: number;
+  numSentences: number;
+  avgTokenRepeat: number;
+}
+
+function tokenize(text: string): string[] {
+  return (text.toLowerCase().match(/\b\w+\b/g) || []);
+}
+
+function splitSentences(text: string): string[] {
+  return text.split(/[.!?]+/).map(s => s.trim()).filter(Boolean);
+}
+
+function repetition3gram(tokens: string[]): number {
+  if (tokens.length < 3) return 0;
+  const counts = new Map<string, number>();
+  for (let i = 0; i < tokens.length - 2; i++) {
+    const tri = `${tokens[i]} ${tokens[i + 1]} ${tokens[i + 2]}`;
+    counts.set(tri, (counts.get(tri) || 0) + 1);
+  }
+  let repeated = 0;
+  counts.forEach(c => { if (c > 1) repeated += c; });
+  return repeated / (tokens.length - 2);
+}
+
+function uniqueRatio(tokens: string[]): number {
+  if (!tokens.length) return 0;
+  return new Set(tokens).size / tokens.length;
+}
+
+function avgTokenRepeat(tokens: string[]): number {
+  if (!tokens.length) return 0;
+  const counts = new Map<string, number>();
+  tokens.forEach(t => counts.set(t, (counts.get(t) || 0) + 1));
+  let totalRepeat = 0;
+  counts.forEach(c => { if (c > 1) totalRepeat += (c - 1); });
+  return totalRepeat / tokens.length;
+}
+
+function computeMetrics(text: string): Metrics {
+  const tokens = tokenize(text);
+  const sentences = splitSentences(text);
+  return {
+    rep3gram: repetition3gram(tokens),
+    uniqueRatio: uniqueRatio(tokens),
+    numTokens: tokens.length,
+    numSentences: sentences.length,
+    avgTokenRepeat: avgTokenRepeat(tokens)
+  };
+}
+
+// Get color for metric value based on thresholds
+// Returns: green (good), yellow (ok), red (bad)
+function getMetricColor(metric: string, value: number): string {
+  switch (metric) {
+    case 'rep3gram':
+      // Lower is better: <0.15 good, <0.30 ok, >=0.30 bad
+      if (value < 0.15) return 'green';
+      if (value < 0.30) return '#d4a000'; // gold/yellow
+      return '#c33'; // red
+    case 'uniqueRatio':
+      // Higher is better (within reason): >0.5 good, >0.35 ok, <=0.35 bad
+      if (value > 0.5) return 'green';
+      if (value > 0.35) return '#d4a000';
+      return '#c33';
+    case 'avgTokenRepeat':
+      // Lower is better: <0.2 good, <0.5 ok, >=0.5 bad
+      if (value < 0.2) return 'green';
+      if (value < 0.5) return '#d4a000';
+      return '#c33';
+    default:
+      return '#666';
+  }
+}
+
+// Highlight current experiment row in results.tsv by commit ID
+function highlightCurrentRow(resultsTsv: string, expDir: string): React.ReactNode {
+  // Extract commit hash from exp_dir (format: YYYYMMDD_HHMMSS-commit_hash)
+  const match = expDir.match(/-(.+)$/);
+  const commitHash = match ? match[1].trim() : null;
+
+  const lines = resultsTsv.split('\n');
+  if (lines.length === 0) return resultsTsv;
+
+  const [header, ...dataLines] = lines;
+  const headerCells = header.split('\t');
+  const commitIdx = headerCells.findIndex(h => h.toLowerCase() === 'commit');
+
+  if (commitIdx === -1 || !commitHash) {
+    return resultsTsv; // No commit column or no hash to match
+  }
+
+  // Reverse data lines to show newest first
+  const reversedDataLines = [...dataLines].reverse();
+
+  const renderedLines: React.ReactNode[] = [];
+
+  for (let i = 0; i < reversedDataLines.length; i++) {
+    const line = reversedDataLines[i];
+    if (!line.trim()) continue;
+    const cells = line.split('\t');
+    const cellValue = cells[commitIdx] || '';
+
+    if (commitHash && cellValue.includes(commitHash)) {
+      // Highlight this line with background color
+      renderedLines.push(
+        <div key={`highlight-${i}`} style={{ backgroundColor: '#fff3cd', display: 'block', padding: '2px 0' }}>
+          {line}
+        </div>
+      );
+    } else {
+      renderedLines.push(
+        <div key={`line-${i}`} style={{ padding: '2px 0' }}>
+          {line}
+        </div>
+      );
+    }
+  }
+
+  return <>{renderedLines}</>;
+}
+
 // Stop at EOS/reserved token - detect <|reserved|> or <|reserved_0|> and truncate
 function stripAfterReserved(text: string): string {
-  // Check for both token variants
   const eos1 = "<|reserved|>";
   const eos2 = "<|reserved_0|>";
-
   const idx1 = text.indexOf(eos1);
   const idx2 = text.indexOf(eos2);
-
-  // Find the earliest occurrence
   let minIdx = -1;
   if (idx1 !== -1 && idx2 !== -1) {
     minIdx = Math.min(idx1, idx2);
@@ -22,10 +144,8 @@ function stripAfterReserved(text: string): string {
   } else if (idx2 !== -1) {
     minIdx = idx2;
   }
-
   return minIdx === -1 ? text : text.slice(0, minIdx);
 }
-
 
 interface GenerateResponse {
   generated_text: string;
@@ -65,7 +185,7 @@ interface ExperimentInfo {
 }
 
 interface ExperimentDir {
-  name: string;
+  exp_dir: string;
   checkpoint_path: string | null;
   has_checkpoint: boolean;
   sample_output: string | null;
@@ -74,6 +194,7 @@ interface ExperimentDir {
     header: string[];
     rows: string[][];
   } | null;
+  prompt?: string;
 }
 
 interface ListResponse {
@@ -84,48 +205,28 @@ interface ListResponse {
 // Info icon component with tooltip
 function InfoIcon({ text }: { text: string }) {
   return (
-    <>
-      <span className="info-icon" data-info={text}>i</span>
-      <style jsx>{`
-        .info-icon {
-          position: relative;
-          display: inline-block;
-          width: 14px;
-          height: 14px;
-          border-radius: 50%;
-          background: #666;
-          color: #fff;
-          font-size: 10px;
-          line-height: 14px;
-          text-align: center;
-          cursor: default;
-          font-family: sans-serif;
-          font-style: normal;
-          margin-left: 4px;
-          vertical-align: middle;
-        }
-        .info-icon::after {
-          content: attr(data-info);
-          position: absolute;
-          bottom: 125%;
-          left: 50%;
-          transform: translateX(-50%);
-          background: #333;
-          color: #fff;
-          padding: 6px 8px;
-          border-radius: 6px;
-          font-size: 11px;
-          white-space: nowrap;
-          opacity: 0;
-          pointer-events: none;
-          transition: opacity 0.2s ease;
-          z-index: 10;
-        }
-        .info-icon:hover::after {
-          opacity: 1;
-        }
-      `}</style>
-    </>
+    <span
+      style={{
+        position: "relative",
+        display: "inline-block",
+        width: "14px",
+        height: "14px",
+        borderRadius: "50%",
+        background: "#666",
+        color: "#fff",
+        fontSize: "10px",
+        lineHeight: "14px",
+        textAlign: "center",
+        cursor: "default",
+        fontFamily: "sans-serif",
+        fontStyle: "normal",
+        marginLeft: "4px",
+        verticalAlign: "middle",
+      }}
+      title={text}
+    >
+      i
+    </span>
   );
 }
 
@@ -351,22 +452,31 @@ function ExperimentCard({ experiment, prevValBpb, sampleData }: ExperimentCardPr
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expInfo, setExpInfo] = useState<ExperimentInfo | null>(null);
-  const [showCommits, setShowCommits] = useState(false);
   const [showResults, setShowResults] = useState(false);
-  const [showModelInfo, setShowModelInfo] = useState(false);
+  const [showMetrics, setShowMetrics] = useState(false);
+  const [metrics, setMetrics] = useState<Metrics | null>(null);
+  const [resultsTsv, setResultsTsv] = useState<string | null>(null);
 
   const API_BASE_URL = "/api/proxy";
 
   useEffect(() => {
     const fetchData = async () => {
       try {
-        // Get experiment info
-        const infoResponse = await fetch(`${API_BASE_URL}/info/${experiment.name}`);
+        const infoResponse = await fetch(`${API_BASE_URL}/info/${experiment.exp_dir}`);
         if (!infoResponse.ok) {
           throw new Error(`API error: ${infoResponse.status}`);
         }
         const infoData: ExperimentInfo = await infoResponse.json();
         setExpInfo(infoData);
+
+        // Fetch results.tsv.global
+        const fileResponse = await fetch(`${API_BASE_URL}/file/${experiment.exp_dir}?filename=results.tsv.global`);
+        if (fileResponse.ok) {
+          const fileData = await fileResponse.json();
+          if (fileData.content) {
+            setResultsTsv(fileData.content);
+          }
+        }
       } catch (err) {
         setError(err instanceof Error ? err.message : "Unknown error");
       } finally {
@@ -377,16 +487,24 @@ function ExperimentCard({ experiment, prevValBpb, sampleData }: ExperimentCardPr
     fetchData();
   }, [experiment]);
 
-  // Don't hide card on error - show error state within the card instead
-
-  // Display pre-computed sample text - strip metadata headers and reserved tokens
+  // Compute metrics from sample output
   const rawSample = sampleData?.sample_content || experiment.sample_output || "";
   const cleanSampleLines = rawSample.split('\n')
-    .filter(line => !line.startsWith('#') && !line.startsWith('\u0000'))
+    .filter(line => !line.startsWith('#'))
+    .map(line => line.replace(/^\u0000/, '').trim())
+    .filter(line => line)
     .join('\n')
     .trim();
   const cleanGeneratedText = stripAfterReserved(cleanSampleLines);
 
+  // Compute metrics when text is available
+  useEffect(() => {
+    if (cleanGeneratedText) {
+      setMetrics(computeMetrics(cleanGeneratedText));
+    }
+  }, [cleanGeneratedText]);
+
+  
   // Parse timestamp from exp_dir (format: YYYYMMDD_HHMMSS-<commit_short>)
   const parseTimestamp = (expDir: string | null | undefined): { full: string; date: string; time: string } => {
     if (!expDir) {
@@ -402,60 +520,27 @@ function ExperimentCard({ experiment, prevValBpb, sampleData }: ExperimentCardPr
     return { full: expDir, date: dateStr, time: timeStr };
   };
 
-  // Fix malformed TSV data where header and data are on the same line
-  const fixResultsTsv = (header: string[], rows: string[][]): { header: string[], rows: string[][] } => {
-    if (rows.length > 0) {
-      return { header, rows };
+  // Extract val_bpb from metadata or results.tsv
+  const valBpbFromModelInfo = sampleData?.model_info && sampleData.model_info.includes('val_bpb:')
+    ? parseFloat(sampleData.model_info.split('val_bpb:')[1].split('\n')[0].trim())
+    : null;
+
+  // Also try to extract from results.tsv
+  const valBpbFromResults = resultsTsv ? (() => {
+    const lines = resultsTsv.split('\n').filter(l => l.trim());
+    const header = lines[0].split('\t');
+    const valBpbIdx = header.findIndex(h => h.toLowerCase() === 'val_bpb');
+    if (valBpbIdx !== -1 && lines.length > 1) {
+      const lastRow = lines[lines.length - 1].split('\t');
+      return parseFloat(lastRow[valBpbIdx]);
     }
+    return null;
+  })() : null;
 
-    const knownHeaders = ['commit', 'val_bpb', 'timestamp', 'step', 'depth', 'vocab_size', 'model_dim', 'n_heads'];
-    const firstHeader = header[0];
+  const valBpb = valBpbFromModelInfo ?? valBpbFromResults;
 
-    if (firstHeader) {
-      const firstValueIsTimestamp = /^\d{8}_\d{6}/.test(firstHeader);
-      const firstValueIsKnownHeader = knownHeaders.includes(firstHeader);
-
-      if (firstValueIsTimestamp || !firstValueIsKnownHeader) {
-        const headerBoundary = header.findIndex(h => knownHeaders.includes(h));
-
-        if (headerBoundary >= 0) {
-          const realHeader = header.slice(headerBoundary);
-          const dataRow = header.slice(0, headerBoundary);
-
-          const descIdx = realHeader.indexOf('description');
-          if (descIdx >= 0) {
-            realHeader.splice(descIdx, 1);
-            if (descIdx < dataRow.length) {
-              dataRow.splice(descIdx, 1);
-            }
-          }
-
-          return { header: realHeader, rows: dataRow.length > 0 ? [dataRow] : [] };
-        }
-      }
-    }
-
-    return { header, rows };
-  };
-
-  const fixedResults = expInfo?.results_data ? fixResultsTsv(expInfo.results_data.header, expInfo.results_data.rows) : { header: [], rows: [] };
-
-  // Reverse rows so most recent appears first
-  const reversedResults = { header: fixedResults.header, rows: [...fixedResults.rows].reverse() };
-
-  // Extract val_bpb from results (first row after reverse = most recent)
-  const getValBpb = (): number | null => {
-    if (!reversedResults.header.length || !reversedResults.rows.length) return null;
-    const valBpbIdx = reversedResults.header.indexOf('val_bpb');
-    if (valBpbIdx === -1) return null;
-    const firstRow = reversedResults.rows[0];
-    const val = firstRow?.[valBpbIdx];
-    return val ? parseFloat(val) : null;
-  };
-  const valBpb = getValBpb();
-
-  // Use experiment.name for timestamp if expInfo not loaded yet
-  const timestamp = expInfo ? parseTimestamp(expInfo.exp_dir) : parseTimestamp(experiment.name);
+  // Use experiment.exp_dir for timestamp if expInfo not loaded yet
+  const timestamp = expInfo ? parseTimestamp(expInfo.exp_dir) : parseTimestamp(experiment.exp_dir);
   const latestCommit = expInfo?.git_log?.[0];
 
   return (
@@ -464,15 +549,45 @@ function ExperimentCard({ experiment, prevValBpb, sampleData }: ExperimentCardPr
         <div style={{display: "flex", alignItems: "center", gap: "8px"}}>
           {timestamp.date || timestamp.full ? (
             <h1 style={{...styles.title, margin: 0}}>
-              {timestamp.date ? `${timestamp.date} ${timestamp.time ? `@ ${timestamp.time}` : ''}` : timestamp.full}
+              {timestamp.date ? `${timestamp.date} ${timestamp.time || ''}` : timestamp.full}
             </h1>
           ) : (
-            <h1 style={{...styles.title, margin: 0}}>Experiment: {experiment.name}</h1>
+            <h1 style={{...styles.title, margin: 0}}>Experiment: {experiment.exp_dir}</h1>
           )}
         </div>
-        {valBpb !== null && (
-          <div style={{fontSize: "12px", color: "#666", textAlign: "right"}}>
-            <span>val_bpb</span><InfoIcon text="Validation bits per byte - lower is better" />: {valBpb.toFixed(3)}
+        {(valBpb !== null || latestCommit) && (
+          <div style={{fontSize: "12px", color: "#666", textAlign: "right", display: "flex", flexDirection: "column", alignItems: "flex-end", gap: "2px"}}>
+            {valBpb !== null && (
+              <div>
+                <span>val_bpb</span><InfoIcon text="Validation bits per byte - lower is better" />: {valBpb.toFixed(3)}
+              </div>
+            )}
+            {latestCommit && (
+              <div style={{position: "relative", display: "inline-block"}}>
+                <span style={{color: "#1976d2", cursor: "help"}}>{latestCommit.commit_short}</span>
+                <div style={{
+                  position: "absolute",
+                  left: 0,
+                  bottom: "100%",
+                  marginBottom: "8px",
+                  backgroundColor: "#333",
+                  color: "#fff",
+                  padding: "10px",
+                  borderRadius: "6px",
+                  fontSize: "11px",
+                  lineHeight: "1.4",
+                  zIndex: 100,
+                  display: "none",
+                  boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
+                  maxWidth: "300px",
+                  wordBreak: "break-word"
+                }} onMouseEnter={(e) => (e.currentTarget.style.display = "block")} onMouseLeave={(e) => (e.currentTarget.style.display = "none")}>
+                  <div style={{fontWeight: "bold", marginBottom: "6px"}}>{latestCommit.commit_short} — {latestCommit.commit_sha}</div>
+                  <div style={{color: "#aaa", fontSize: "10px"}}>{latestCommit.author || "Unknown"} | {latestCommit.date || "Unknown"}</div>
+                  <div style={{marginTop: "6px", color: "#fff"}}>{latestCommit.message.trim()}</div>
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -494,10 +609,14 @@ function ExperimentCard({ experiment, prevValBpb, sampleData }: ExperimentCardPr
 
       {!loading && !error && (
         <>
+          {/* Sample Output */}
           {cleanGeneratedText && (
             <div style={styles.result}>
               <div style={styles.row}>
-                <strong>Sample Output:</strong>
+                <strong>Prompt:</strong> Once upon a time
+              </div>
+              <div style={styles.row}>
+                <strong>Generated Output:</strong>
               </div>
               <div style={{...styles.row, whiteSpace: 'pre-wrap', fontFamily: 'monospace', fontSize: '11px'}}>
                 {cleanGeneratedText}
@@ -505,88 +624,52 @@ function ExperimentCard({ experiment, prevValBpb, sampleData }: ExperimentCardPr
             </div>
           )}
 
-          {expInfo && (
+          {/* Metrics */}
+          {metrics && cleanGeneratedText && (
+            <div style={{marginTop: "8px"}}>
+              <button
+                style={styles.dropdownButton}
+                onClick={() => setShowMetrics(!showMetrics)}
+              >
+                <span><strong>Metrics</strong></span>
+                <span style={styles.arrow}>{showMetrics ? "▼" : "▶"}</span>
+              </button>
+              {showMetrics && (
+                <div style={{...styles.dropdownContent, backgroundColor: "transparent", padding: 0}}>
+                  <div style={styles.row}>
+                    <strong>rep3gram:</strong> <span style={{color: getMetricColor('rep3gram', metrics.rep3gram)}}>{metrics.rep3gram.toFixed(4)}</span> <small style={{color: '#888'}}>(&lt;0.15 good, &lt;0.30 ok)</small>
+                  </div>
+                  <div style={styles.row}>
+                    <strong>uniqueRatio:</strong> <span style={{color: getMetricColor('uniqueRatio', metrics.uniqueRatio)}}>{metrics.uniqueRatio.toFixed(4)}</span> <small style={{color: '#888'}}>(&gt;0.5 good, &gt;0.35 ok)</small>
+                  </div>
+                  <div style={styles.row}>
+                    <strong>avgTokenRepeat:</strong> <span style={{color: getMetricColor('avgTokenRepeat', metrics.avgTokenRepeat)}}>{metrics.avgTokenRepeat.toFixed(4)}</span> <small style={{color: '#888'}}>(&lt;0.2 good, &lt;0.5 ok)</small>
+                  </div>
+                  <div style={styles.row}>
+                    <strong>numTokens:</strong> {metrics.numTokens}
+                  </div>
+                  <div style={styles.row}>
+                    <strong>numSentences:</strong> {metrics.numSentences}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {expInfo && resultsTsv && (
             <div style={styles.metadataSection}>
-              {/* Model Info from sample_output */}
-              {sampleData?.model_info && (
-                <div style={{marginBottom: "8px"}}>
-                  <button
-                    style={styles.dropdownButton}
-                    onClick={() => setShowModelInfo(!showModelInfo)}
-                  >
-                    <span><strong>Model Info</strong></span>
-                    <span style={styles.arrow}>{showModelInfo ? "▼" : "▶"}</span>
-                  </button>
-                  {showModelInfo && (
-                    <div style={{...styles.dropdownContent, whiteSpace: 'pre-wrap', fontFamily: 'monospace', fontSize: '11px'}}>
-                      {sampleData.model_info}
-                    </div>
-                  )}
+              <button
+                style={styles.dropdownButton}
+                onClick={() => setShowResults(!showResults)}
+              >
+                <span><strong>results.tsv</strong></span>
+                <span style={styles.arrow}>{showResults ? "▼" : "▶"}</span>
+              </button>
+              {showResults && (
+                <div style={{...styles.dropdownContent, whiteSpace: 'pre-wrap', fontFamily: 'monospace', fontSize: '10px', maxHeight: '300px', overflow: 'auto'}}>
+                  {highlightCurrentRow(resultsTsv, experiment.exp_dir)}
                 </div>
               )}
-
-              {latestCommit && (
-                <div>
-                  <button
-                    style={styles.dropdownButton}
-                    onClick={() => setShowCommits(!showCommits)}
-                  >
-                    <span>
-                      <strong>Latest Commit:</strong> {latestCommit.commit_short} — {latestCommit.message.trim()}
-                    </span>
-                    <span style={styles.arrow}>{showCommits ? "▼" : "▶"}</span>
-                  </button>
-                  {showCommits && expInfo.git_log && (
-                    <div style={styles.dropdownContent}>
-                      {expInfo.git_log.map((commit, idx) => (
-                        <div key={idx} style={styles.commitItem}>
-                          <div><strong>{commit.commit_short}</strong> - {commit.commit_sha}</div>
-                          <div style={{color: "#666"}}>
-                            {commit.author} — {commit.date}
-                          </div>
-                          <div style={{marginTop: "2px"}}>{commit.message.trim()}</div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {expInfo.has_results && expInfo.results_data && (
-                <div style={{marginTop: "8px"}}>
-                  <button
-                    style={styles.dropdownButton}
-                    onClick={() => setShowResults(!showResults)}
-                  >
-                    <span><strong>Results.tsv</strong></span>
-                    <span style={styles.arrow}>{showResults ? "▼" : "▶"}</span>
-                  </button>
-                  {showResults && (
-                    <div style={styles.dropdownContent}>
-                      <table style={styles.table}>
-                        <thead>
-                          <tr>
-                            {reversedResults.header.map((h, idx) => (
-                              <th key={idx} style={styles.th}>{h}</th>
-                            ))}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {reversedResults.rows.map((row, rowIdx) => (
-                            <tr key={rowIdx}>
-                              {row.map((cell, cellIdx) => (
-                                <td key={cellIdx} style={styles.td}>{cell}</td>
-                              ))}
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Metrics removed - sample output is pre-computed */}
             </div>
           )}
         </>
@@ -636,12 +719,12 @@ export default function Home() {
               }
             }
 
-            setSampleData(prev => ({ ...prev, [exp.name]: sample }));
+            setSampleData(prev => ({ ...prev, [exp.exp_dir]: sample }));
             if (valBpb !== null) {
-              setValBpbData(prev => ({ ...prev, [exp.name]: valBpb }));
+              setValBpbData(prev => ({ ...prev, [exp.exp_dir]: valBpb }));
             }
           } catch (err) {
-            console.error(`Failed to load data for ${exp.name}:`, err);
+            console.error(`Failed to load data for ${exp.exp_dir}:`, err);
           }
         });
 
@@ -675,10 +758,10 @@ export default function Home() {
           <>
             {experiments.map((exp, idx) => (
               <ExperimentCard
-                key={exp.name}
+                key={exp.exp_dir}
                 experiment={exp}
-                prevValBpb={idx < experiments.length - 1 ? valBpbData[experiments[idx + 1].name] : undefined}
-                sampleData={sampleData[exp.name]}
+                prevValBpb={idx < experiments.length - 1 ? valBpbData[experiments[idx + 1].exp_dir] : undefined}
+                sampleData={sampleData[exp.exp_dir]}
               />
             ))}
           </>

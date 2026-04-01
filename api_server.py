@@ -263,6 +263,40 @@ API server that serves pre-computed samples from AutoResearch experiments.
             model_info=model_info
         )
 
+    class FileResponse(BaseModel):
+        """Response containing file content."""
+        experiment: str
+        filename: str
+        content: Optional[str] = None
+        error: Optional[str] = None
+
+    @app.get("/file/{exp_name}/{filename:path}", response_model=FileResponse)
+    async def get_file(exp_name: str, filename: str):
+        """Get any file from an experiment directory."""
+        exp_path = Path(CHECKPOINTS_BASE_PATH) / exp_name
+
+        if not exp_path.exists() or not exp_path.is_dir():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Experiment not found: {exp_name}"
+            )
+
+        # Security: prevent directory traversal
+        safe_filename = Path(filename).name
+        if filename != safe_filename and '..' in filename:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid filename"
+            )
+
+        content = read_experiment_file(exp_path, filename)
+
+        return FileResponse(
+            experiment=exp_path.name,
+            filename=filename,
+            content=content
+        )
+
 else:
     # Create a minimal app for testing when FastAPI is not available
     print("WARNING: FastAPI not available. API server will not function.")

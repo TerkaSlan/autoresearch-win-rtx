@@ -44,5 +44,7 @@ EXPOSE 3000
 
 ENV PORT=3000
 ENV HOSTNAME="0.0.0.0"
+# Backend URL - can be overridden at runtime via Kubernetes config
+ENV BACKEND_URL=http://localhost:8000
 
 CMD ["node", "server.js"]

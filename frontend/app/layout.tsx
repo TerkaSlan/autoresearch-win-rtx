@@ -1,8 +1,8 @@
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "AutoResearch Progress Watcher",
-  description: "AutoResearch Progress Watcher",
+  title: "Autoresearch Progress Watcher",
+  description: "Autoresearch Progress Watcher",
 };
 
 export default function RootLayout({

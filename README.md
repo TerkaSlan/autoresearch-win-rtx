@@ -128,7 +128,7 @@ POST /generate
 Content-Type: application/json
 
 {
-  "prompt": "Once upon a time there was a",
+  "prompt": "Once upon a time",
   "max_tokens": 100,
   "temperature": 0.8,
   "top_k": 50,
@@ -139,10 +139,10 @@ Content-Type: application/json
 Response:
 ```json
 {
-  "generated_text": "Once upon a time there was a little girl named Lily who loved to explore the forest...",
+  "generated_text": "Once upon a time",
   "generated_tokens": [0, 45, 123, 456, ...],
   "num_tokens": 101,
-  "prompt_used": "Once upon a time there was a",
+  "prompt_used": "Once upon a time",
   "config_used": {...}
 }
 ```
