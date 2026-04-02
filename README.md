@@ -1,17 +1,10 @@
 # AutoResearch Inference
 
-> Fork of [jsegov/autoresearch-win-rtx](https://github.com/jsegov/autoresearch-win-rtx) with production-ready CPU inference API.
+> Fork of [jsegov/autoresearch-win-rtx](https://github.com/jsegov/autoresearch-win-rtx) with production-ready inference API and web frontend.
 
-This fork adds a **production-ready inference API** with 100% architectural compatibility with GPU-trained checkpoints:
+This fork adds a **production-ready inference API** with 100% architectural compatibility with GPU-trained checkpoints, plus a Next.js web frontend for experiment visualization.
 
-- **Exact model architecture** from `train.py` (RMS norm, ReLU², value embeddings, rotary encoding, softcapped logits)
-- **Text-based generation** with decoded output (not just tokens)
-- **CPU-only inference** - runs GPU checkpoints on CPU with seamless dtype conversion
-- **Built-in tokenizer** - BPE tokenizer trained on TinyStories included in Docker image
-- **K8s-ready** - non-root user (UID 1000), healthchecks, self-contained image
-- **FastAPI server** - `/health` and `/generate` endpoints with OpenAPI docs
-
-## Fork's Scope: What Was Added
+## What Was Added
 
 Based on the upstream [karpathy/autoresearch](https://github.com/karpathy/autoresearch) and [jsegov/autoresearch-win-rtx](https://github.com/jsegov/autoresearch-win-rtx):
 
@@ -20,31 +13,17 @@ Based on the upstream [karpathy/autoresearch](https://github.com/karpathy/autore
 | Training (GPU) | ✅ | ✅ (same) |
 | Checkpoint save with provenance | ✅ | ✅ (same) |
 | **Inference module** | ❌ | **✅** EXACT model from train.py |
-| **REST API server** | ❌ | **✅** FastAPI with `/generate` |
-| **Text-based generation** | ❌ | **✅** Decoded text output |
+| **REST API server** | ❌ | **✅** FastAPI serving experiment samples |
+| **Web frontend** | ❌ | **✅** Next.js dashboard |
+| **Metrics computation** | ❌ | **✅** Repetition, uniqueness, constraint scoring |
 | **CPU inference** | ❌ | **✅** GPU checkpoints on CPU |
 | **Built-in tokenizer** | ❌ | **✅** BPE in Docker image |
 | **Dockerfile for API** | ❌ | **✅** `Dockerfile-api` |
 | **K8s deployment ready** | ❌ | **✅** UID 1000 non-root |
-| **Healthcheck endpoint** | ❌ | **✅** `/health` |
-## Fork scope (`jsegov`)
 
 ## Quick Start
 
 ### Docker (Recommended for Production)
-### Fork scope (`TerkaSlan`)
-
-This fork includes several enhancements to the training workflow for better experiment tracking and reproducibility:
-
-- **Checkpoint history**: Each training run saves a timestamped checkpoint (`checkpoint_YYYYMMDD_HHMMSS_pre_eval.pt`) before evaluation, enabling full experiment history recovery.
-- **Best model tracking**: Automatically maintains `checkpoint_best.pt` with the lowest validation bits-per-byte (val_bpb) across all runs.
-- **Experimental provenance**: Successfully marked experiments save a complete provenance package in `checkpoints/exp_YYYYMMDD_HHMMSS/` containing:
-  - `run_info.json` — full metadata including config, runtime info (GPU details, compute capability), and metrics
-  - `program.md` — copy of the agent instructions used for the experiment
-  - `results.tsv` — copy of the results file for analysis
-- **Checkpoint directory**: All checkpoints are now saved to a dedicated `checkpoints/` directory for organized storage.
-
-## How it works
 
 ```bash
 # Build the inference API image (includes tokenizer)
@@ -53,12 +32,27 @@ docker build -t autoresearch-inference:latest -f Dockerfile-api .
 # Run locally (CPU-only)
 docker run -p 8000:8000 \
   -v /path/to/checkpoints:/app/checkpoints \
-  -e AUTORESEARCH_CHECKPOINT=/app/checkpoints/checkpoint_best.pt \
+  -e AUTORESEARCH_CHECKPOINTS_DIR=/app/checkpoints \
   autoresearch-inference:latest
 
 # Or push to your registry
 docker tag autoresearch-inference:latest cerit.io/tslaninakova/autoresearch-inference:latest
 docker push cerit.io/tslaninakova/autoresearch-inference:latest
+```
+
+### Frontend (Next.js Dashboard)
+
+```bash
+cd frontend
+
+# Install dependencies
+npm install
+
+# Start development server
+npm run dev
+
+# Build for production
+npm run build
 ```
 
 ### Local Development (Training + Inference)
@@ -81,12 +75,14 @@ uv run api_server.py
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/` | GET | API information and features |
-| `/health` | GET | Health check, model + tokenizer status |
+| `/` | GET | API information and available endpoints |
+| `/health` | GET | Health check, experiments count |
 | `/docs` | GET | Interactive Swagger UI documentation |
-| `/redoc` | GET | ReDoc documentation |
-| `/generate` | POST | Generate text from prompt |
-| `/reload_model` | POST | Load a new checkpoint without restart |
+| `/experiments` | GET | List all experiment directories |
+| `/latest` | GET | Get latest experiment sample |
+| `/info/{exp_name}` | GET | Detailed info about specific experiment |
+| `/sample/{exp_name}` | GET | Get sample output from experiment |
+| `/file/{exp_name}/{filename}` | GET | Get any file from experiment directory |
 
 ### Health Check
 
@@ -98,77 +94,29 @@ Response:
 ```json
 {
   "status": "ok",
-  "model_loaded": true,
-  "model_ready": true,
-  "tokenizer_loaded": true,
-  "device": "cpu",
-  "dataset": "tinystories",
-  "checkpoint_path": "/app/checkpoints/checkpoint_best.pt",
-  "model_config": {
-    "sequence_len": 2048,
-    "vocab_size": 8192,
-    "n_layer": 8,
-    "n_head": 8,
-    "n_kv_head": 8,
-    "n_embd": 512,
-    "window_pattern": "SSSL",
-    "attention_backend": "sdpa"
-  },
-  "model_metrics": {
-    "val_bpb": 2.123456,
-    "step": 5000
-  }
+  "checkpoints_path": "/app/checkpoints",
+  "experiments_found": 5
 }
 ```
 
-### Generate Text (Text-based Prompt - Recommended)
+### List Experiments
 
 ```bash
-POST /generate
-Content-Type: application/json
-
-{
-  "prompt": "Once upon a time",
-  "max_tokens": 100,
-  "temperature": 0.8,
-  "top_k": 50,
-  "seed": 42
-}
+curl http://localhost:8000/experiments
 ```
 
 Response:
 ```json
-{
-  "generated_text": "Once upon a time",
-  "generated_tokens": [0, 45, 123, 456, ...],
-  "num_tokens": 101,
-  "prompt_used": "Once upon a time",
-  "config_used": {...}
-}
-```
-
-### Generate Text (Token-based - Advanced)
-
-```bash
-POST /generate
-Content-Type: application/json
-
-{
-  "prompt_tokens": [0, 45, 123],
-  "max_tokens": 50,
-  "temperature": 1.0
-}
-```
-
-### Reload Model
-
-```bash
-POST /reload_model
-Content-Type: application/json
-
-{
-  "checkpoint": "/app/checkpoints/checkpoint_exp_20240317_12_34_56.pt"
-}
+[
+  {
+    "name": "20240317_123456-abc123",
+    "path": "/app/checkpoints/20240317_123456-abc123",
+    "checkpoint_exists": true,
+    "sample_output": "Once upon a time...",
+    "model_info": "val_bpb: 2.123",
+    "git_log": "commit abc123..."
+  }
+]
 ```
 
 ## Configuration
@@ -177,9 +125,55 @@ Environment variables:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `AUTORESEARCH_CHECKPOINT` | Path to checkpoint file | `checkpoints/checkpoint_best.pt` |
-| `DEVICE` | Device to use (cpu/cuda) | `cpu` (forced for API) |
-| `AUTORESEARCH_CACHE_DIR` | Tokenizer cache location | `~/.cache/autoresearch` |
+| `AUTORESEARCH_CHECKPOINTS_DIR` | Path to checkpoints folder | `./checkpoints` |
+
+## Project Structure
+
+```
+.
+├── api_server.py          # FastAPI server (serves pre-computed samples)
+├── inference.py           # Inference module (exact model from train.py)
+├── train.py               # Training script with checkpoint management
+├── prepare.py             # Data preparation + tokenizer training
+├── program.md             # Agent instructions for experiments
+├── Dockerfile             # Training environment (GPU)
+├── Dockerfile-api         # Inference API environment (CPU)
+├── pyproject.toml         # Main dependencies
+├── pyproject-api.toml     # API-specific dependencies
+├── checkpoints/           # Experiment outputs
+│   ├── YYYYMMDD_HHMMSS-commit/
+│   │   ├── checkpoint.pt
+│   │   ├── sample_output.txt
+│   │   ├── model_info.txt
+│   │   └── git_log.txt
+│   └── ...
+└── frontend/              # Next.js web dashboard
+    ├── app/
+    │   ├── page.tsx       # Main dashboard (experiment browser)
+    │   ├── about/page.tsx # About/documentation page
+    │   └── api/           # API proxy routes
+    ├── lib/
+    │   └── metrics.ts     # Metrics computation utilities
+    └── package.json
+```
+
+## How It Works
+
+### Architecture Flow
+
+1. **Training**: `train.py` runs experiments on GPU, saves checkpoints with provenance
+2. **Inference**: After successful experiment, agent runs inference and saves `sample_output.txt`
+3. **API**: `api_server.py` serves pre-computed samples (no dynamic model loading)
+4. **Frontend**: Next.js dashboard browses experiments, visualizes metrics
+
+### Why Pre-computed Samples?
+
+The API serves **pre-computed samples** instead of running inference on-demand because:
+
+- Eliminates architecture compatibility issues between training/inference environments
+- No model loading needed (fast responses, just reading text files)
+- Works with any model architecture the training agent produces
+- Training and inference run in the same environment (guaranteed compatibility)
 
 ## Model Architecture (Ground Truth)
 
@@ -198,64 +192,7 @@ The inference module uses the **exact same architecture** as `train.py` for 100%
 | **Sliding Window** | Dynamic window sizes per layer |
 | **GQA** | `enable_gqa` parameter for grouped-query attention |
 
-This ensures GPU-trained checkpoints work identically on CPU.
-
-## CPU Inference Fidelity
-
-**Short answer: 100% architecturally identical to GPU training. No sacrifices.**
-
-The inference implementation maintains **bit-for-bit architectural fidelity** with `train.py`. All fixes made for CPU compatibility are either:
-
-### 1. PyTorch Version Workarounds (Functionally Equivalent)
-
-**`enable_gqa` parameter handling:**
-- `train.py` uses `F.scaled_dot_product_attention(..., enable_gqa=True)` for GQA
-- PyTorch 2.4.0+cpu (inference) doesn't support `enable_gqa` parameter (added in 2.5+)
-- **Fallback**: Call SDPA without the parameter - GQA is handled automatically when `k`/`v` have fewer heads than `q`
-- **Result**: Mathematically identical attention output
-
-### 2. Bug Fixes (Correcting Broken Code)
-
-**Tensor dimension fix in `generate()`:**
-- Original code had redundant `unsqueeze(1)` causing dimension mismatch
-- Fix: Remove redundant unsqueeze since `sample_top_k()` already returns correct shape
-- **Result**: Code now works as intended
-
-### 3. Checkpoint Loading (Serialization Compatibility)
-
-**Pickle compatibility for `GPTConfig`:**
-- Checkpoints saved from `train.py` pickle `GPTConfig` as `__main__.GPTConfig`
-- Inference registers `GPTConfig` in `__main__` namespace for pickle resolution
-- **Result**: Checkpoints load correctly without architectural changes
-
-### 4. dtype Handling (Transparent Conversion)
-
-**bfloat16 → float32 on CPU:**
-- GPU checkpoints use bfloat16 for mixed precision training
-- PyTorch automatically casts weights to float32 when loading on CPU
-- **Result**: Same weights, different precision (CPU doesn't support bfloat16 natively)
-- **Impact**: Negligible for inference - model behavior is preserved
-
-### Verification
-
-| Aspect | GPU Training | CPU Inference | Match |
-|--------|--------------|---------------|-------|
-| RMS Norm | ✅ | ✅ | ✅ |
-| ReLU² Activation | ✅ | ✅ | ✅ |
-| Rotary Embeddings | ✅ | ✅ | ✅ |
-| Value Embeddings | ✅ | ✅ | ✅ |
-| Residual Scaling | ✅ | ✅ | ✅ |
-| Softcapped Logits | ✅ | ✅ | ✅ |
-| Sliding Window | ✅ | ✅ | ✅ |
-| GQA | ✅ | ✅ (auto) | ✅ |
-| Architecture | Identical | Identical | ✅ |
-| Checkpoint Format | Compatible | Compatible | ✅ |
-
-**Conclusion**: The CPU inference produces the same outputs as GPU inference would, given the same input tokens and sampling parameters. The only difference is internal precision (float32 vs bfloat16), which has negligible impact on output quality.
-
-## Checkpoint Loading
-
-The `inference.py` module handles multiple checkpoint formats:
+## Checkpoint Format
 
 ### Wrapped Format (recommended)
 ```python
@@ -270,7 +207,6 @@ The `inference.py` module handles multiple checkpoint formats:
 
 ### Plain State Dict Format
 ```python
-# Auto-infers config from tensor shapes
 {
   'transformer.wte.weight': tensor(...),
   'transformer.h.0.attn.c_q.weight': tensor(...),
@@ -278,31 +214,40 @@ The `inference.py` module handles multiple checkpoint formats:
 }
 ```
 
-When loading plain checkpoints, configuration is automatically derived from:
-- `transformer.wte.weight` shape → vocab_size, n_embd
-- `transformer.h.0.attn.c_q` shape → n_head, head_dim
-- `transformer.h.0.attn.c_k` shape → n_kv_head
-- `resid_lambdas` shape → n_layer
+When loading plain checkpoints, configuration is automatically derived from tensor shapes.
+
+## Experiment Tracking Features
+
+### Checkpoint History
+Each training run saves timestamped checkpoints (`checkpoint_YYYYMMDD_HHMMSS_pre_eval.pt`) before evaluation, enabling full experiment history recovery.
+
+### Best Model Tracking
+Automatically maintains `checkpoint_best.pt` with the lowest validation bits-per-byte across all runs.
+
+### Experimental Provenance
+Successfully marked experiments save a complete provenance package:
+- `run_info.json` - full metadata including config, runtime info, metrics
+- `program.md` - copy of agent instructions used
+- `results.tsv` - copy of results file for analysis
 
 ## Docker Images
 
 ### `Dockerfile` (Training - Upstream)
-- Base: `nvidia/cuda:12.6.0-devel-ubuntu22.04`
+- Base: `nvidia/cu12.6.0-devel-ubuntu22.04`
 - PyTorch: 2.9.1+cu128 (GPU)
 - User: UID 1000
 - Purpose: Training on GPU (RTX PRO 6000 Blackwell compatible)
 
 ### `Dockerfile-api` (Inference - Added by this fork)
 - Base: `python:3.10-slim`
-- PyTorch: 2.4.0+cpu
+- PyTorch: CPU-only
 - User: UID 1000 (for K8s securityContext)
 - Includes: BPE tokenizer (trained on TinyStories)
-- Image size: ~1.87 GB
 - Purpose: Production inference API on CPU
 
 ## GPU Support (Training Only)
 
-The Dockerfile (training) supports these GPUs:
+Supported GPUs:
 
 | Architecture | Compute Capability | Minimum VRAM | Example Models |
 |--------------|-------------------|-------------|----------------|
@@ -313,26 +258,13 @@ The Dockerfile (training) supports these GPUs:
 
 **Inference runs on CPU** - GPU checkpoints are transparently loaded on CPU with proper dtype conversion.
 
-## Files Added by This Fork
-
-| File | Purpose |
-|------|---------|
-| `inference.py` | Exact model architecture from train.py + checkpoint loading + generation |
-| `api_server.py` | FastAPI server with `/health`, `/generate`, `/reload_model` endpoints |
-| `Dockerfile-api` | CPU-only Docker image with built-in tokenizer for K8s deployment |
-| `pyproject-api.toml` | Minimal dependencies for CPU inference |
-| `create_mock_checkpoint.py` | Utility for generating test checkpoints |
-
-## Files Not Used
-
-- `model.py` - Original AI-generated model (incorrect architecture, DO NOT USE)
-
 ## Requirements
 
 - Python 3.10+
 - [uv](https://docs.astral.sh/uv/) package manager
 - **Training**: NVIDIA GPU (Turing >=8GB or Ampere/Ada/Blackwell >=10GB)
 - **Inference**: CPU-only (GPU not required)
+- Node.js 18+ (for frontend)
 - Docker optional (required for K8s deployment)
 
 ## License
