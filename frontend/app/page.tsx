@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import type { CSSProperties } from "react";
 
@@ -57,6 +57,20 @@ function computeMetrics(text: string): Metrics {
     numSentences: sentences.length,
     avgTokenRepeat: avgTokenRepeat(tokens)
   };
+}
+
+// Compute a score from metrics where lower is better
+// Score = rep3gram + (1 - uniqueRatio) + avgTokenRepeat
+// rep3gram: lower is better (<0.15 good)
+// uniqueRatio: higher is better (>0.5 good), so we use (1 - uniqueRatio)
+// avgTokenRepeat: lower is better (<0.2 good)
+// numTokens: must be at least 20 to be considered valid (penalize very short outputs)
+function computeMetricsScore(metrics: Metrics): number | null {
+  // Reject experiments with too few tokens (not meaningful for evaluation)
+  if (metrics.numTokens < 20) {
+    return null;
+  }
+  return metrics.rep3gram + (1 - metrics.uniqueRatio) + metrics.avgTokenRepeat;
 }
 
 // Get color for metric value based on thresholds
@@ -446,9 +460,11 @@ interface ExperimentCardProps {
   experiment: ExperimentDir;
   prevValBpb?: number;
   sampleData?: SampleOutput;
+  counter?: number;
+  isBest?: boolean;
 }
 
-function ExperimentCard({ experiment, prevValBpb, sampleData }: ExperimentCardProps) {
+function ExperimentCard({ experiment, prevValBpb, sampleData, counter, isBest }: ExperimentCardProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expInfo, setExpInfo] = useState<ExperimentInfo | null>(null);
@@ -544,12 +560,13 @@ function ExperimentCard({ experiment, prevValBpb, sampleData }: ExperimentCardPr
   const latestCommit = expInfo?.git_log?.[0];
 
   return (
-    <div style={styles.container}>
+    <div style={{...styles.container, backgroundColor: isBest ? '#e8f5e9' : 'white'}}>
       <div style={{display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "8px"}}>
         <div style={{display: "flex", alignItems: "center", gap: "8px"}}>
           {timestamp.date || timestamp.full ? (
             <h1 style={{...styles.title, margin: 0}}>
-              {timestamp.date ? `${timestamp.date} ${timestamp.time || ''}` : timestamp.full}
+              {counter !== undefined ? `Exp #${counter}: ` : ''}{timestamp.date ? `${timestamp.date} ${timestamp.time || ''}` : timestamp.full}
+              {isBest && <span style={{color: '#2e7d32', marginLeft: '8px', fontSize: '14px'}}>| The best yet according to the metrics!</span>}
             </h1>
           ) : (
             <h1 style={{...styles.title, margin: 0}}>Experiment: {experiment.exp_dir}</h1>
@@ -563,30 +580,7 @@ function ExperimentCard({ experiment, prevValBpb, sampleData }: ExperimentCardPr
               </div>
             )}
             {latestCommit && (
-              <div style={{position: "relative", display: "inline-block"}}>
-                <span style={{color: "#1976d2", cursor: "help"}}>{latestCommit.commit_short}</span>
-                <div style={{
-                  position: "absolute",
-                  left: 0,
-                  bottom: "100%",
-                  marginBottom: "8px",
-                  backgroundColor: "#333",
-                  color: "#fff",
-                  padding: "10px",
-                  borderRadius: "6px",
-                  fontSize: "11px",
-                  lineHeight: "1.4",
-                  zIndex: 100,
-                  display: "none",
-                  boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
-                  maxWidth: "300px",
-                  wordBreak: "break-word"
-                }} onMouseEnter={(e) => (e.currentTarget.style.display = "block")} onMouseLeave={(e) => (e.currentTarget.style.display = "none")}>
-                  <div style={{fontWeight: "bold", marginBottom: "6px"}}>{latestCommit.commit_short} — {latestCommit.commit_sha}</div>
-                  <div style={{color: "#aaa", fontSize: "10px"}}>{latestCommit.author || "Unknown"} | {latestCommit.date || "Unknown"}</div>
-                  <div style={{marginTop: "6px", color: "#fff"}}>{latestCommit.message.trim()}</div>
-                </div>
-              </div>
+              <span style={{color: "#1976d2"}}>{latestCommit.commit_short}</span>
             )}
           </div>
         )}
@@ -637,19 +631,27 @@ function ExperimentCard({ experiment, prevValBpb, sampleData }: ExperimentCardPr
               {showMetrics && (
                 <div style={{...styles.dropdownContent, backgroundColor: "transparent", padding: 0}}>
                   <div style={styles.row}>
-                    <strong>rep3gram:</strong> <span style={{color: getMetricColor('rep3gram', metrics.rep3gram)}}>{metrics.rep3gram.toFixed(4)}</span> <small style={{color: '#888'}}>(&lt;0.15 good, &lt;0.30 ok)</small>
+                    <strong>rep3gram:</strong> <span style={{color: getMetricColor('rep3gram', metrics.rep3gram)}}>{metrics.rep3gram.toFixed(4)}</span>
+                    <InfoIcon text="Percentage of repeated 3-grams. Lower = less repetitive. &lt;0.15 good, &lt;0.30 ok" />
+                    <small style={{color: '#888'}}>&nbsp;(&lt;0.15 good, &lt;0.30 ok)</small>
                   </div>
                   <div style={styles.row}>
-                    <strong>uniqueRatio:</strong> <span style={{color: getMetricColor('uniqueRatio', metrics.uniqueRatio)}}>{metrics.uniqueRatio.toFixed(4)}</span> <small style={{color: '#888'}}>(&gt;0.5 good, &gt;0.35 ok)</small>
+                    <strong>uniqueRatio:</strong> <span style={{color: getMetricColor('uniqueRatio', metrics.uniqueRatio)}}>{metrics.uniqueRatio.toFixed(4)}</span>
+                    <InfoIcon text="Ratio of unique tokens to total tokens. Higher = more diverse vocabulary. &gt;0.5 good, &gt;0.35 ok" />
+                    <small style={{color: '#888'}}>&nbsp;(&gt;0.5 good, &gt;0.35 ok)</small>
                   </div>
                   <div style={styles.row}>
-                    <strong>avgTokenRepeat:</strong> <span style={{color: getMetricColor('avgTokenRepeat', metrics.avgTokenRepeat)}}>{metrics.avgTokenRepeat.toFixed(4)}</span> <small style={{color: '#888'}}>(&lt;0.2 good, &lt;0.5 ok)</small>
+                    <strong>avgTokenRepeat:</strong> <span style={{color: getMetricColor('avgTokenRepeat', metrics.avgTokenRepeat)}}>{metrics.avgTokenRepeat.toFixed(4)}</span>
+                    <InfoIcon text="Average number of times each token is repeated. Lower = less repetition. &lt;0.2 good, &lt;0.5 ok" />
+                    <small style={{color: '#888'}}>&nbsp;(&lt;0.2 good, &lt;0.5 ok)</small>
                   </div>
                   <div style={styles.row}>
                     <strong>numTokens:</strong> {metrics.numTokens}
+                    <InfoIcon text="Total number of tokens in the generated output" />
                   </div>
                   <div style={styles.row}>
                     <strong>numSentences:</strong> {metrics.numSentences}
+                    <InfoIcon text="Number of sentences (split by . ! ?)" />
                   </div>
                 </div>
               )}
@@ -684,6 +686,7 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [sampleData, setSampleData] = useState<{[key: string]: SampleOutput}>({});
   const [valBpbData, setValBpbData] = useState<{[key: string]: number}>({});
+  const [metricsData, setMetricsData] = useState<{[key: string]: Metrics}>({});
 
   const API_BASE_URL = "/api/proxy";
 
@@ -723,6 +726,27 @@ export default function Home() {
             if (valBpb !== null) {
               setValBpbData(prev => ({ ...prev, [exp.exp_dir]: valBpb }));
             }
+
+            // Compute metrics from sample output if available
+            const rawSample = exp.sample_output || "";
+            const cleanSampleLines = rawSample.split('\n')
+              .filter(line => !line.startsWith('#'))
+              .map(line => line.replace(/^\u0000/, '').trim())
+              .filter(line => line)
+              .join('\n')
+              .trim();
+            // Simple metrics computation inline for best experiment detection
+            const tokens = cleanSampleLines.toLowerCase().match(/\b\w+\b/g) || [];
+            const sentences = cleanSampleLines.split(/[.!?]+/).filter(s => s.trim());
+            if (tokens.length > 0) {
+              const rep3gramVal = repetition3gram(tokens);
+              const uniqueRatioVal = uniqueRatio(tokens);
+              const avgTokenRepeatVal = avgTokenRepeat(tokens);
+              setMetricsData(prev => ({
+                ...prev,
+                [exp.exp_dir]: { rep3gram: rep3gramVal, uniqueRatio: uniqueRatioVal, numTokens: tokens.length, numSentences: sentences.length, avgTokenRepeat: avgTokenRepeatVal }
+              }));
+            }
           } catch (err) {
             console.error(`Failed to load data for ${exp.exp_dir}:`, err);
           }
@@ -738,6 +762,20 @@ export default function Home() {
 
     fetchExperiments();
   }, []);
+
+  // Compute the best experiment based on metrics score (lower is better)
+  const bestExpDir = useMemo(() => {
+    let bestDir: string | null = null;
+    let bestScore = Infinity;
+    Object.entries(metricsData).forEach(([expDir, metrics]) => {
+      const score = computeMetricsScore(metrics);
+      if (score !== null && score < bestScore) {
+        bestScore = score;
+        bestDir = expDir;
+      }
+    });
+    return bestDir;
+  }, [metricsData]);
 
   return (
     <main style={styles.main}>
@@ -756,14 +794,20 @@ export default function Home() {
         )}
         {!loading && !error && experiments.length > 0 && (
           <>
-            {experiments.map((exp, idx) => (
-              <ExperimentCard
-                key={exp.exp_dir}
-                experiment={exp}
-                prevValBpb={idx < experiments.length - 1 ? valBpbData[experiments[idx + 1].exp_dir] : undefined}
-                sampleData={sampleData[exp.exp_dir]}
-              />
-            ))}
+            {experiments.map((exp, idx) => {
+                // Counter: oldest = 1, newest = N (but display newest first)
+                const counter = experiments.length - idx;
+                return (
+                  <ExperimentCard
+                    key={exp.exp_dir}
+                    experiment={exp}
+                    prevValBpb={idx < experiments.length - 1 ? valBpbData[experiments[idx + 1].exp_dir] : undefined}
+                    sampleData={sampleData[exp.exp_dir]}
+                    counter={counter}
+                    isBest={bestExpDir === exp.exp_dir}
+                  />
+                );
+              })}
           </>
         )}
       </div>
