@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import Link from "next/link";
 import type { CSSProperties } from "react";
 
 // Metrics computation
@@ -440,7 +439,14 @@ function Header() {
           </svg>
         </a>
         <span style={styles.headerDivider}>|</span>
-        <Link href="/about" style={styles.navLink}>About</Link>
+        <a
+          href="https://blog.e-infra.cz/blog/autoresearch/"
+          target="_blank"
+          rel="noopener noreferrer"
+          style={styles.navLink}
+        >
+          About
+        </a>
         <span style={styles.headerDivider}>|</span>
         <a
           href="https://terkaslan.github.io/"
@@ -612,7 +618,7 @@ function ExperimentCard({ experiment, prevValBpb, sampleData, counter, isBest }:
               <div style={styles.row}>
                 <strong>Generated Output:</strong>
               </div>
-              <div style={{...styles.row, whiteSpace: 'pre-wrap', fontFamily: 'monospace', fontSize: '11px'}}>
+              <div style={{...styles.row, whiteSpace: 'pre-wrap', wordBreak: 'break-word', overflowWrap: 'break-word', fontFamily: 'monospace', fontSize: '11px'}}>
                 {cleanGeneratedText}
               </div>
             </div>
